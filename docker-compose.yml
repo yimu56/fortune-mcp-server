@@ -1,0 +1,28 @@
+# docker compose up -d 即可；改 .env 后 docker compose up -d 重启生效
+services:
+  fortune-mcp:
+    build: .
+    image: fortune-mcp:2.0.0
+    container_name: fortune-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "18088:18088"
+    volumes:
+      - fortune-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,json,sys;sys.exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:18088/healthz',timeout=3)).get('status')=='ok' else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  fortune-data:

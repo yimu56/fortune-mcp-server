@@ -1,0 +1,28 @@
+# 本地配置（含账号口令与令牌，严禁提交）
+.env
+.env.*
+!.env.example
+/fortune-mcp.env
+*.env.bak
+*.env.bak.*
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 运行时缓存与数据
+.cache/
+data/
+*.log
+
+# 编辑器与系统文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 打包产物
+*.zip
+dist/
+build/

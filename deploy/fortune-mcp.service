@@ -1,0 +1,36 @@
+# Fortune 记账 MCP Server —— systemd 单元参考（install.sh 会自动生成同类文件）
+# 手动安装步骤：
+#   sudo cp server.py fortune_api.py fortune_tools.py /opt/fortune-mcp/
+#   sudo cp .env.example /etc/fortune-mcp.env    # 改端口与令牌
+#   sudo cp deploy/fortune-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now fortune-mcp
+# 注意：ExecStart 里的 python3 路径用 `command -v python3` 的真实路径替换。
+
+[Unit]
+Description=Fortune Bookkeeping MCP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fortune
+Group=fortune
+WorkingDirectory=/opt/fortune-mcp
+EnvironmentFile=/etc/fortune-mcp.env
+Environment=HOME=/var/lib/fortune-mcp
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/fortune-mcp/server.py
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/fortune-mcp
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fortune-mcp
+
+[Install]
+WantedBy=multi-user.target
