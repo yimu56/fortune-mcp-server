@@ -20,6 +20,8 @@
 ### 变更
 
 - 版本升级至 3.0.0，`SERVER_VERSION` 与 Docker 镜像标签同步更新。
+- `useradmin.py` 启动时自动加载 `FORTUNE_ENV_FILE`、`/etc/fortune-mcp.env` 与 `.env`，
+  修复手工执行校验时读不到 `FORTUNE_BASE_URL`、回落到占位地址的问题；新增 `--env-file` 参数。
 - 恢复 MIT LICENSE、CHANGELOG 与 .gitignore；实施手册改为英文路径，便于跨平台协作。
 - 发布前完成全量脱敏：内网地址、测试账号、口令与姓名示例统一替换为占位符。
 

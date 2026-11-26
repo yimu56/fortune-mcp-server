@@ -246,6 +246,10 @@ python3 /opt/fortune-mcp/useradmin.py import users.csv          # 批量导入
 
 凭据库改动**不需要重启**（每次调用都重新读取）。
 
+> CLI 启动时自动加载 `FORTUNE_ENV_FILE`、`/etc/fortune-mcp.env` 与 `.env`，
+> 因此 `--verify` 校验账号时能直接读到 `FORTUNE_BASE_URL`；shell 中已 export 的变量优先。
+> 需要指定其他文件时加 `--env-file <路径>`。
+
 ### 3. 行为约定
 
 | 场景 | 服务端行为 |

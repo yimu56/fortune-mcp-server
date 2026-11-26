@@ -21,10 +21,13 @@
        sudo python3 /opt/fortune-mcp/useradmin.py template > users.csv
 
 公共参数：
-    --file  指定 users.json 路径（默认取 FORTUNE_USERS_FILE 或 /var/lib/fortune-mcp/users.json）
-    --key   指定加密密钥（默认取 FORTUNE_CRED_KEY，其次同目录 users.json.key）
+    --file      指定 users.json 路径（默认取 FORTUNE_USERS_FILE 或 /var/lib/fortune-mcp/users.json）
+    --key       指定加密密钥（默认取 FORTUNE_CRED_KEY，其次同目录 users.json.key）
+    --env-file  指定环境变量文件（默认依次尝试 FORTUNE_ENV_FILE、/etc/fortune-mcp.env、同目录 .env）
 
 说明：
+    · 启动时自动加载环境变量文件，行为与 systemd 的 EnvironmentFile 一致；
+      已存在的环境变量不会被覆盖，因此 shell 里 export 的值优先。
     · 密码优先用 getpass 输入（不回显）；自动化时可用 --password-stdin 或 USERADMIN_PLAIN=1。
     · 改了凭据库不需要重启服务（每次调用都重新读取）。
 """
@@ -36,6 +39,68 @@ import os
 import sys
 
 from user_store import DEFAULT_USERS_FILE, UserStore, UserStoreError
+
+
+# ---------------------------------------------------------------------------
+# 环境变量文件加载
+# ---------------------------------------------------------------------------
+DEFAULT_ENV_FILES = (
+    os.environ.get("FORTUNE_ENV_FILE") or "/etc/fortune-mcp.env",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+    os.path.join(os.getcwd(), ".env"),
+)
+
+
+def _parse_env_line(line):
+    """解析一行 KEY=VALUE，返回 (key, value)；非赋值行返回 None。"""
+    text = line.strip()
+    if not text or text.startswith("#"):
+        return None
+    if text.startswith("export "):
+        text = text[7:].lstrip()
+    if "=" not in text:
+        return None
+    key, value = text.split("=", 1)
+    key = key.strip()
+    if not key or not key.replace("_", "").isalnum() or key[0].isdigit():
+        return None
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return key, value
+
+
+def load_env_files(explicit=None):
+    """把环境变量文件读入 os.environ，已存在的变量保持原值。
+
+    服务端由 systemd 的 EnvironmentFile 注入配置；本 CLI 为手工执行，
+    需要自行加载，否则手工校验账号时读不到 FORTUNE_BASE_URL。
+    """
+    candidates = []
+    if explicit:
+        path = os.path.abspath(explicit)
+        if not os.path.isfile(path):
+            raise UserStoreError("环境变量文件不存在：%s" % path)
+        candidates.append(path)
+    candidates.extend(DEFAULT_ENV_FILES)
+
+    loaded, seen = [], set()
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+                for line in f:
+                    parsed = _parse_env_line(line)
+                    if parsed and parsed[0] not in os.environ:
+                        os.environ[parsed[0]] = parsed[1]
+        except OSError:
+            continue
+        loaded.append(path)
+    return loaded
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +162,9 @@ def verify_credential(platform_user, store):
         return
     try:
         creds = store.creds_for(platform_user)
+        if not creds.get("base_url"):
+            print("   ⚠ 未读到接口地址，将使用内置默认地址；"
+                  "建议在 /etc/fortune-mcp.env 设置 FORTUNE_BASE_URL，或用 --base-url 指定")
         client = FortuneClient(base_url=creds["base_url"], username=creds["username"],
                                password=creds["password"])
         client.login()
@@ -376,6 +444,7 @@ def main():
 """)
     parser.add_argument("--file", help="users.json 路径")
     parser.add_argument("--key", help="加密密钥（hex 或 base64）")
+    parser.add_argument("--env-file", help="环境变量文件（默认 /etc/fortune-mcp.env 或 .env）")
     sub = parser.add_subparsers(dest="cmd")
 
     p_add = sub.add_parser("add", help="添加/更新用户（缺参数时进入向导）")
@@ -404,6 +473,7 @@ def main():
 
     args = parser.parse_args()
     try:
+        load_env_files(getattr(args, "env_file", None))
         store = build_store(args)
         cmd = args.cmd
 
