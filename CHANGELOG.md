@@ -3,6 +3,25 @@
 版本号遵循语义化版本（SemVer），与 `fortune_tools.py` 中的 `SERVER_VERSION`、
 镜像标签及发布标签保持一致。
 
+## v3.1.1 — 2026-11-26
+
+修复连接器走 SSE 通道时 401 难以定位，以及身份字段取不到导致绑定键退化为 union_id 的问题。
+
+### 修复
+
+- `_bearer()` 兼容不带 `Bearer ` 前缀的 `Authorization`（部分平台直接放令牌），
+  同时继续接受 `X-MCP-Token` 与 `?token=`；`Basic` / `Digest` 等前缀仍拒绝。
+- `_deny()` 输出 401 诊断日志：请求方法、路径、Authorization 形态（none / bearer / raw）、
+  其他令牌载体与当前鉴权模式，可区分「未带令牌」与「令牌校验失败」。
+- 身份字段取值扩展为 `alias_id` → `username` → `email` → `sub`，
+  修复应用 Scope 未配置别名时只能绑定 union_id 的问题；新增 `aliasField`
+  标明实际命中字段，诊断工具与 `--check-identity` 同步展示。
+
+### 文档
+
+- README 补充 Scope 与 `userinfo` 返回字段的对应关系，以及候选键顺序。
+- 版本升至 3.1.1，`SERVER_VERSION` 与镜像标签同步。
+
 ## v3.1.0 — 2026-11-26
 
 修复企业版连接器「自建应用免授权」下无法识别用户、所有调用报

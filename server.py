@@ -258,11 +258,19 @@ class WbIdentity:
                 return None
 
         sub = str(payload.get("sub") or "").strip()
-        alias = ""
+        alias, alias_field = "", None
         if cfg.wb_fetch_alias:
             try:
-                alias = str(self._get_json(cfg.wb_userinfo_url, token)
-                            .get("alias_id") or "").strip()
+                profile = self._get_json(cfg.wb_userinfo_url, token)
+                if not isinstance(profile, dict):
+                    profile = {}
+                # scope 决定 userinfo 返回哪些字段：alias_id 需应用配置别名，
+                # 未配置时退到 profile 的 username / email，最后用 introspect 的 sub
+                for field in ("alias_id", "username", "email"):
+                    value = str(profile.get(field) or "").strip()
+                    if value:
+                        alias, alias_field = value, field
+                        break
             except WbIdentityError as exc:
                 log("userinfo 获取失败，降级只用 sub：%s" % exc)
         candidates = [c for c in (alias, sub) if c]
@@ -270,6 +278,7 @@ class WbIdentity:
             return None
         return {"sub": sub or None,
                 "aliasId": alias or None,
+                "aliasField": alias_field,
                 "tid": tid or None,
                 "jti": payload.get("jti"),
                 "exp": payload.get("exp"),
@@ -544,12 +553,16 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- 鉴权 -------------------------------------------------------------
     def _bearer(self):
-        """取出调用方带来的令牌（Bearer / X-MCP-Token / ?token=）。"""
-        auth = self.headers.get("Authorization") or ""
-        if auth.lower().startswith("bearer "):
+        """取出调用方带来的令牌（Bearer / 裸 Authorization / X-MCP-Token / ?token=）。"""
+        auth = (self.headers.get("Authorization") or "").strip()
+        low = auth.lower()
+        if low.startswith("bearer "):
             given = auth[7:].strip()
             if given:
                 return given
+        elif auth and not low.startswith(("basic ", "digest ", "negotiate ")):
+            # 部分平台把令牌直接放进 Authorization，不带 Bearer 前缀
+            return auth
         given = (self.headers.get("X-MCP-Token") or "").strip()
         if given:
             return given
@@ -595,6 +608,18 @@ class Handler(BaseHTTPRequestHandler):
         message = "缺少或错误的 Bearer Token"
         if self._identity_error:
             message += "（%s）" % self._identity_error
+        auth = (self.headers.get("Authorization") or "").strip()
+        if not auth:
+            auth_kind = "none"
+        elif auth.lower().startswith("bearer "):
+            auth_kind = "bearer"
+        else:
+            auth_kind = "raw"
+        log("401 %s %s | Authorization=%s | X-MCP-Token=%s | query-token=%s | mode=%s"
+            % (self.command, urlparse(self.path).path, auth_kind,
+               "yes" if (self.headers.get("X-MCP-Token") or "").strip() else "no",
+               "yes" if (parse_qs(urlparse(self.path).query).get("token") or [""])[0] else "no",
+               "introspect" if self.app.cfg.introspect_enabled else "static"))
         self._send_json(401, {"error": "unauthorized", "message": message})
 
     def _identity_header(self):
@@ -823,12 +848,14 @@ class Handler(BaseHTTPRequestHandler):
                 "staticToken": bool(self._static_used),
                 "sub": info.get("sub"),
                 "aliasId": info.get("aliasId"),
+                "aliasField": info.get("aliasField"),
                 "accountId": info.get("tid"),
                 "jti": info.get("jti"),
                 "candidates": info.get("candidates"),
             }
             hint = ("身份来自 access_token 校验（自建应用免授权）。"
-                    "platformUser 为凭据库中命中的键（aliasId 优先，其次 sub）。")
+                    "aliasField 表示实际命中的字段（alias_id / username / email）；"
+                    "platformUser 为凭据库中命中的键（优先 aliasId，其次 sub）。")
         else:
             workbuddy = {"mode": "headers", "staticToken": bool(self._static_used)}
             hint = ("当前只认身份头，而「自建应用免授权」模式不会注入这类头。"
@@ -1116,6 +1143,7 @@ def check_identity(cfg, token):
     payload = {"ok": True,
                "identity": {"sub": info.get("sub"),
                             "aliasId": info.get("aliasId"),
+                            "aliasField": info.get("aliasField"),
                             "accountId": info.get("tid"),
                             "jti": info.get("jti"),
                             "exp": info.get("exp")},

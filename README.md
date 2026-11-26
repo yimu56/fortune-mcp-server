@@ -7,7 +7,7 @@
 - 同时支持 **stdio** 模式（本地 `mcp.json` 调试）
 - 工具数：**13 个**（查询账户/账本/分类/标签/收付款方 + 记账/转账/建账户）
 - 默认下游地址：`http://fortune.example.com:46031/prod-api`（可用 `FORTUNE_BASE_URL` 覆盖）
-- 当前版本：**v3.1.0**（与 `SERVER_VERSION`、Docker 镜像标签及发布标签一致）
+- 当前版本：**v3.1.1**（与 `SERVER_VERSION`、Docker 镜像标签及发布标签一致）
 
 ---
 
@@ -238,7 +238,11 @@ curl -s -X POST http://127.0.0.1:18088/mcp \
 
 企业控制台的四种认证方式里，只有「自建应用免授权」会把**员工本人**的身份传下来；`API Key`、`OAuth 2.0` 都是连接器级固定凭据，全员同一身份，做不到按人隔离。
 
-走第一种时，服务端把令牌交给平台校验，拿回 `alias_id`（企业内工号/别名）与 `sub`（union_id），**先 alias_id 后 sub** 依次查凭据库——所以 `useradmin.py` 里 `--user` 填哪个都能命中。可用一条命令自检：
+走第一种时，服务端把令牌交给平台校验：`introspect` 给出 `sub`（union_id），`userinfo` 按应用 Scope 给出 `alias_id` / `username` / `email`。服务端依次尝试 **alias_id → username → email → sub** 查凭据库，所以 `useradmin.py` 里 `--user` 填哪个都能命中。
+
+> `userinfo` 返回哪些字段由自建应用的 Scope 决定：`profile` 提供 `username`，`email` 提供 `email`，`openid` 提供 `id_token`。三者都未授权时只能落到 `sub`。`--check-identity` 输出的 `aliasField` 会显示实际命中的字段。
+
+可用一条命令自检：
 
 ```bash
 python3 /opt/fortune-mcp/server.py --check-identity '<员工 access_token>'
