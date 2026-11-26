@@ -822,4 +822,28 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except ModuleNotFoundError as exc:
+        log("启动失败：缺少模块 %r" % (exc.name,))
+        log("  确认部署目录包含 server.py、fortune_api.py、fortune_tools.py、user_store.py")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    except OSError as exc:
+        if getattr(exc, "errno", None) in (48, 98, 10048):
+            log("启动失败：端口被占用（%s）" % exc)
+            log("  先停掉占用进程：ss -ltnp | grep :<端口>")
+        else:
+            log("启动失败：%s" % exc)
+            log("  检查 /etc/fortune-mcp.env、TLS 证书路径与数据目录权限")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        log("启动失败：%s: %s" % (type(exc).__name__, exc))
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

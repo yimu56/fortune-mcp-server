@@ -73,7 +73,9 @@ unzip fortune-mcp-server.zip && cd fortune-mcp-server && sudo bash install.sh
 ```bash
 sudo useradd -r -s /sbin/nologin -d /var/lib/fortune-mcp fortune
 sudo mkdir -p /opt/fortune-mcp /var/lib/fortune-mcp
-sudo cp server.py fortune_api.py fortune_tools.py /opt/fortune-mcp/
+sudo cp server.py fortune_api.py fortune_tools.py user_store.py useradmin.py \
+        smoke_test.py healthcheck.py uninstall.sh /opt/fortune-mcp/
+sudo chmod +x /opt/fortune-mcp/uninstall.sh
 sudo cp .env.example /etc/fortune-mcp.env
 sudo vi /etc/fortune-mcp.env          # 改 MCP_AUTH_TOKEN、确认账号密码
 sudo cp deploy/fortune-mcp.service /etc/systemd/system/
