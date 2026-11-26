@@ -233,19 +233,29 @@ curl -s -o /dev/null -w 'HTTP %{http_code}\n' \
 
 ### 3.3 第二步：连接与鉴权
 
-这是最容易填错的一屏，逐字段对照：
+先选认证方式——这一步决定服务端能否认出「是谁在记账」：
+
+| 认证方式 | 上游收到 | 服务端配置 |
+|---|---|---|
+| **自建应用免授权**（推荐） | 每名员工的 `Authorization: Bearer <access_token>` | `WB_ACCOUNT_ID` / `WB_CLIENT_ID` / `WB_CLIENT_SECRET` 填齐即自动启用 |
+| `API Key` / `Bearer Token` | 全员同一个静态令牌 | 仅单账号，做不到按人隔离 |
+
+> 只有「自建应用免授权」会把**员工本人**的身份传给上游；`API Key` 是连接器级固定凭据，所有人共用一份账。
+> 选前者时按 README 第六节第 0 步配好三项凭据，可用 `server.py --check-identity '<token>'` 自检身份链路。
+
+再逐字段对照：
 
 | 字段 | 填什么 | 常见错误 |
 |---|---|---|
 | 传输方式 | **Streamable HTTP** | 老平台只有 SSE 选项时，填 `/sse` 地址，其余不变 |
 | 服务 URL | `http://fortune.example.com:18088/mcp` | ① 漏了 `/mcp`；② 加了尾斜杠 `/mcp/` → 404 |
-| 鉴权方式 | `Bearer Token` / `自定义 Header` | 选“无鉴权”会被服务端 401 |
-| Header 名 | `Authorization` | 写成 `Auth` / `Token` 都不认 |
-| Header 值 | `Bearer <令牌>` | ① 漏了 `Bearer ` 前缀；② 后面没空格；③ 令牌带引号/换行 |
+| 鉴权方式 | 自建应用免授权 / Bearer Token | 选「无鉴权」会被服务端 401 |
+| Header 名（仅 API Key） | `Authorization` | 平台默认 `X-API-Key`，服务端不认；写成 `Auth` / `Token` 也不认 |
+| Header 值（仅 API Key） | `Bearer <令牌>` | ① 漏了 `Bearer ` 前缀；② 后面没空格；③ 令牌带引号/换行 |
 | 超时 | `30` 秒 | 默认 5s 太短，首次登录下游约 2–4s |
 | 探活路径（若有） | `/healthz` | 该路径免鉴权，适合健康检查 |
 
-> **令牌取法**：`sudo grep MCP_AUTH_TOKEN /etc/fortune-mcp.env`，取 `=` 后面整段。
+> **令牌取法（仅 API Key 模式）**：`sudo grep MCP_AUTH_TOKEN /etc/fortune-mcp.env`，取 `=` 后面整段。
 
 ### 3.4 第三步：同步工具
 

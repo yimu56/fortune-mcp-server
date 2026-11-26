@@ -3,6 +3,36 @@
 版本号遵循语义化版本（SemVer），与 `fortune_tools.py` 中的 `SERVER_VERSION`、
 镜像标签及发布标签保持一致。
 
+## v3.1.0 — 2026-11-26
+
+修复企业版连接器「自建应用免授权」下无法识别用户、所有调用报
+「未能识别当前用户身份」的问题。
+
+### 修复
+
+- 新增 access_token 身份校验（`WbIdentity`）：按官方文档调用
+  `introspect` 验令牌、`userinfo` 取 `alias_id`，把员工身份映射到凭据库。
+  该认证方式下平台只传 `Authorization: Bearer <access_token>`，
+  **不会**注入 `X-User-Id` / `X-WorkBuddy-User` 等身份头，旧的头部识别逻辑
+  在这种形态下必然失败。
+- `_authorized()` 改为三路：服务端静态令牌 → 员工 access_token → 未配置鉴权。
+  校验结果按令牌哈希缓存（默认 300s），单次请求只往返一次身份服务。
+- 凭据库查找改为候选键：先 `alias_id`、后 `sub`，命中即返回；未绑定时
+  直接给出可执行的 `useradmin.py add` 命令。
+- 校验企业归属：令牌 `tid` 与服务端 `WB_ACCOUNT_ID` 不一致时拒绝；
+  可选 `WB_STRICT_AUD=1` 再校验 `aud` 是否含本应用 `client_id`。
+
+### 新增
+
+- `server.py --check-identity <token>`：一条命令验证令牌能否解析出身份
+  并命中凭据库，不用等连接器回调。
+- 诊断工具 `fortune_diagnostic` 增加 `workbuddyIdentity` 段
+  （mode / sub / aliasId / accountId / jti / candidates）。
+- 环境变量：`WB_ACCOUNT_ID`、`WB_CLIENT_ID`、`WB_CLIENT_SECRET`、
+  `WB_INTROSPECT`、`WB_OAUTH_BASE`、`WB_FETCH_ALIAS`、
+  `WB_IDENTITY_CACHE_TTL`、`WB_STRICT_AUD`、`WB_ALLOW_STATIC_TOKEN`。
+- 版本升至 3.1.0，`SERVER_VERSION` 与镜像标签同步。
+
 ## v3.0.0 — 2026-11-26
 
 在 v2.0.0 基础上恢复并强化多租户与写入安全能力，作为新的公开发布版本。

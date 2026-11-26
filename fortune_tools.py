@@ -7,7 +7,7 @@ from datetime import datetime
 from fortune_api import FortuneError
 
 SERVER_NAME = "fortune-bookkeeping"
-SERVER_VERSION = "3.0.0"
+SERVER_VERSION = "3.1.0"
 
 INSTRUCTIONS = """\
 本服务连接 Fortune 记账系统，可查询账户余额、账本、分类、收付款方与标签，并新增支出、收入、转账与账户。

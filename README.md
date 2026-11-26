@@ -7,7 +7,7 @@
 - 同时支持 **stdio** 模式（本地 `mcp.json` 调试）
 - 工具数：**13 个**（查询账户/账本/分类/标签/收付款方 + 记账/转账/建账户）
 - 默认下游地址：`http://fortune.example.com:46031/prod-api`（可用 `FORTUNE_BASE_URL` 覆盖）
-- 当前版本：**v3.0.0**（与 `SERVER_VERSION`、Docker 镜像标签及发布标签一致）
+- 当前版本：**v3.1.0**（与 `SERVER_VERSION`、Docker 镜像标签及发布标签一致）
 
 ---
 
@@ -201,9 +201,16 @@ curl -s -X POST http://127.0.0.1:18088/mcp \
 | `MCP_PATH` | `/mcp` | Streamable HTTP 路径 |
 | `MCP_AUTH_TOKEN` | 空 | **生产必填**，Bearer 令牌；为空时启动日志会告警 |
 | `MCP_SESSION_TTL` | `3600` | 会话空闲回收秒数 |
-| `FORTUNE_MULTI_TENANT` | `0` | 置 1 开启多用户隔离，按身份头取各自凭据 |
+| `FORTUNE_MULTI_TENANT` | `0` | 置 1 开启多用户隔离，按调用方身份取各自凭据 |
 | `FORTUNE_USERS_FILE` | `/var/lib/fortune-mcp/users.json` | 凭据库路径 |
-| `MCP_USER_HEADERS` | `X-WorkBuddy-User,X-User-Id,…` | 身份头候选，按顺序取第一个非空 |
+| `WB_ACCOUNT_ID` / `WB_CLIENT_ID` / `WB_CLIENT_SECRET` | 空 | 填齐即启用 access_token 校验（自建应用免授权），取值见第八节 |
+| `WB_INTROSPECT` | 空 | 留空＝凭据齐全即启用；`1` 强制启用；`0` 强制关闭 |
+| `WB_OAUTH_BASE` | `https://oauth2.account.tencent.com` | 身份服务根地址（私有化/异构域名时改） |
+| `WB_FETCH_ALIAS` | `1` | 是否再调 userinfo 取 `alias_id`（工号）；`0` 则只用 `sub` |
+| `WB_IDENTITY_CACHE_TTL` | `300` | 令牌校验结果缓存秒数（撤销令牌最长滞后这么久） |
+| `WB_STRICT_AUD` | `0` | 置 1 校验令牌 `aud` 是否等于本应用 `client_id` |
+| `WB_ALLOW_STATIC_TOKEN` | `1` | 是否仍接受 `MCP_AUTH_TOKEN`（运维/冒烟用，生产建议 `0`） |
+| `MCP_USER_HEADERS` | `X-WorkBuddy-User,X-User-Id,…` | 身份头候选，仅在平台注入这类头时生效 |
 | `FORTUNE_SINGLE_FALLBACK` | `0` | 认不出身份时是否退回单账号（默认不退回，避免记错账） |
 | `FORTUNE_CRED_KEY` | 空 | 凭据加密密钥（hex/base64）；留空自动生成 `users.json.key` |
 | `FORTUNE_ALLOW_HEADER_CRED` | `0` | 置 1 允许 `X-Fortune-Username/Password/Base-Url` 头覆盖账号（多用户共用一个连接器） |
@@ -218,7 +225,25 @@ curl -s -X POST http://127.0.0.1:18088/mcp \
 默认是**单账号**：服务端只持有一组 `.env` 凭据，所有人看到同一份数据。
 要让每人只看到自己的账，开启多租户——**同一个连接器、同一份配置**，按调用方身份取各自的记账凭据。
 
-**前提**：记账系统里每人有独立账号；企业版连接器能把当前用户身份传过来（见第七节诊断工具）。
+**前提**：记账系统里每人有独立账号；服务端能认出「这是谁」（见下面第 0 步）。
+
+### 0. 先确认身份从哪来
+
+服务端认人的方式有两种，按连接器实际形态二选一：
+
+| 形态 | 上游收到 | 服务端配置 |
+|---|---|---|
+| **自建应用免授权**（推荐） | `Authorization: Bearer <access_token>`，每人不同 | 配齐 `WB_ACCOUNT_ID` / `WB_CLIENT_ID` / `WB_CLIENT_SECRET` 即自动启用 |
+| 前置网关注入身份头 | `X-WorkBuddy-User` 等 | `FORTUNE_MULTI_TENANT=1` + `MCP_USER_HEADERS` |
+
+企业控制台的四种认证方式里，只有「自建应用免授权」会把**员工本人**的身份传下来；`API Key`、`OAuth 2.0` 都是连接器级固定凭据，全员同一身份，做不到按人隔离。
+
+走第一种时，服务端把令牌交给平台校验，拿回 `alias_id`（企业内工号/别名）与 `sub`（union_id），**先 alias_id 后 sub** 依次查凭据库——所以 `useradmin.py` 里 `--user` 填哪个都能命中。可用一条命令自检：
+
+```bash
+python3 /opt/fortune-mcp/server.py --check-identity '<员工 access_token>'
+# ok=true 且 boundUser 非空，说明身份链路和凭据映射都通了
+```
 
 ### 1. 开启
 
