@@ -3,6 +3,32 @@
 版本号遵循语义化版本（SemVer），与 `fortune_tools.py` 中的 `SERVER_VERSION`、
 镜像标签及发布标签保持一致。
 
+## v3.1.2 — 2026-11-26
+
+修复「自建应用免授权」下平台通过自定义头传递令牌导致全程 401 的问题，补齐命令行自检的配置读取。
+
+### 修复
+
+- 鉴权载体新增 `X-Oneid-Access-Token` 等自定义令牌头：WorkBuddy 企业版该认证方式
+  通过这类头传 access_token，不使用 `Authorization`，此前所有请求都被判为「无令牌」。
+  查询参数同时接受 `token` 与 `access_token`。
+- `_deny()` 输出请求头清单与 User-Agent；401 响应改为 `Connection: close` 并消费请求体，
+  消除残留字节引发的 `Bad request syntax` 400。
+- `user_store.py` 读写密钥文件失败时给出可执行的权限修复命令，
+  替代原先直接抛出的 `PermissionError`。
+- 诊断工具的请求头快照对 `X-Oneid-Access-Token`、`Cookie`、`X-Fortune-Password`
+  等凭据类头一并打码，避免排障接口成为令牌泄露通道。
+
+### 新增
+
+- `server.py` 命令行模式（`--check-identity` / `--self-check`）自动加载环境变量文件，
+  新增 `--env-file`；文件不可读时输出明确警告，不再误报「未启用 access_token 校验」。
+
+### 文档
+
+- README 补充认证载体清单、部署完整性要求与 401 排查路径。
+- 版本升至 3.1.2，`SERVER_VERSION` 与镜像标签同步。
+
 ## v3.1.1 — 2026-11-26
 
 修复连接器走 SSE 通道时 401 难以定位，以及身份字段取不到导致绑定键退化为 union_id 的问题。

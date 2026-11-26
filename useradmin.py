@@ -73,6 +73,7 @@ def _parse_env_line(line):
 def load_env_files(explicit=None):
     """把环境变量文件读入 os.environ，已存在的变量保持原值。
 
+    与 server.py 中的同名函数保持解析规则、优先级一致，改动需同步。
     服务端由 systemd 的 EnvironmentFile 注入配置；本 CLI 为手工执行，
     需要自行加载，否则手工校验账号时读不到 FORTUNE_BASE_URL。
     """

@@ -71,8 +71,13 @@ class Cipher:
                     continue
             raise UserStoreError("FORTUNE_CRED_KEY 格式无效（需 hex 或 base64，至少 16 字节）")
         if key_file and os.path.exists(key_file):
-            with open(key_file, "rb") as f:
-                raw = f.read()
+            try:
+                with open(key_file, "rb") as f:
+                    raw = f.read()
+            except OSError as exc:
+                raise UserStoreError(
+                    "密钥文件不可读：%s（%s）。修正：sudo chown fortune:fortune %s "
+                    "&& sudo chmod 600 %s" % (key_file, exc, key_file, key_file))
             if raw.startswith(b"hex:"):
                 key = bytes.fromhex(raw[4:].decode().strip())
             elif len(raw.strip()) == 64 and all(c in b"0123456789abcdefABCDEF"
@@ -86,10 +91,16 @@ class Cipher:
         if not key_file:
             raise UserStoreError("未提供加密密钥")
         key = secrets.token_bytes(32)
-        os.makedirs(os.path.dirname(os.path.abspath(key_file)), exist_ok=True)
-        fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(key)
+        key_dir = os.path.dirname(os.path.abspath(key_file))
+        try:
+            os.makedirs(key_dir, exist_ok=True)
+            fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(key)
+        except OSError as exc:
+            raise UserStoreError(
+                "无法写入密钥文件 %s（%s）。修正：sudo mkdir -p %s "
+                "&& sudo chown fortune:fortune %s" % (key_file, exc, key_dir, key_dir))
         return cls(key)
 
     def _keystream(self, nonce, length):

@@ -7,7 +7,7 @@
 - 同时支持 **stdio** 模式（本地 `mcp.json` 调试）
 - 工具数：**13 个**（查询账户/账本/分类/标签/收付款方 + 记账/转账/建账户）
 - 默认下游地址：`http://fortune.example.com:46031/prod-api`（可用 `FORTUNE_BASE_URL` 覆盖）
-- 当前版本：**v3.1.1**（与 `SERVER_VERSION`、Docker 镜像标签及发布标签一致）
+- 当前版本：**v3.1.2**（与 `SERVER_VERSION`、Docker 镜像标签及发布标签一致）
 
 ---
 
@@ -233,8 +233,12 @@ curl -s -X POST http://127.0.0.1:18088/mcp \
 
 | 形态 | 上游收到 | 服务端配置 |
 |---|---|---|
-| **自建应用免授权**（推荐） | `Authorization: Bearer <access_token>`，每人不同 | 配齐 `WB_ACCOUNT_ID` / `WB_CLIENT_ID` / `WB_CLIENT_SECRET` 即自动启用 |
+| **自建应用免授权**（推荐） | `X-Oneid-Access-Token: <access_token>`，每人不同；部分版本用 `Authorization: Bearer` | 配齐 `WB_ACCOUNT_ID` / `WB_CLIENT_ID` / `WB_CLIENT_SECRET` 即自动启用 |
 | 前置网关注入身份头 | `X-WorkBuddy-User` 等 | `FORTUNE_MULTI_TENANT=1` + `MCP_USER_HEADERS` |
+
+> 实测记录：企业版该认证方式通过 `X-Oneid-Access-Token` 头传令牌，请求里**不会**出现 `Authorization`。
+> 服务端同时接受 `Bearer`、裸 `Authorization`、`X-Oneid-Access-Token`、`X-MCP-Token`
+> 与 `?token=` / `?access_token=`，因此不需要按平台版本改配置。
 
 企业控制台的四种认证方式里，只有「自建应用免授权」会把**员工本人**的身份传下来；`API Key`、`OAuth 2.0` 都是连接器级固定凭据，全员同一身份，做不到按人隔离。
 
@@ -263,6 +267,10 @@ echo '记账密码' | python3 /opt/fortune-mcp/useradmin.py add \
 sudo sed -i 's/^#*\s*FORTUNE_MULTI_TENANT=.*/FORTUNE_MULTI_TENANT=1/' /etc/fortune-mcp.env
 sudo systemctl restart fortune-mcp
 ```
+
+> 开关未开启时 `load_identity()` 直接返回空，凭据库不会加载——即使认出了员工身份，
+> 也会退回 `.env` 里的单账号。启动日志中的 `多租户模式：凭据库 …（已绑定 N 人）`
+> 是判断它是否生效的唯一依据，没有这一行就说明没生效。
 
 ### 2. 日常管理
 
@@ -362,8 +370,10 @@ python3 /opt/fortune-mcp/useradmin.py import users.csv          # 批量导入
 |---|---|
 | 报 `set: pipefail: invalid option name` 或 `invalid option nameset: pipefail` | 脚本被 Windows 换行污染（CRLF），`\r` 粘在 `pipefail` 后面 | `sed -i 's/\r$//' *.sh` 后重跑；新版脚本已内置自愈，会自动转 LF 再执行 |
 | `无法连接记账服务 …` | 服务器到 `fortune.example.com:46031` 不通：`curl -v http://fortune.example.com:46031/prod-api/getRsaPublicKey`；检查路由/防火墙 |
-| `HTTP 401` 调 MCP 接口 | 没带 `Authorization: Bearer`，或令牌与 `MCP_AUTH_TOKEN` 不一致 |
-| `连接器保存时报连接超时` | 平台侧到服务器网络不通（内网地址！见教程第 1 节） |
+| `HTTP 401` 调 MCP 接口 | 服务端日志会打印 `401 … mode=…` 与请求头清单，按下面的「401 排查流程」判断 |
+| 启动失败：`缺少模块 'user_store'` | 部署目录没拷全，补 `user_store.py`、`useradmin.py` 后重启 |
+| 启动失败：`密钥文件不可读` 或 `Permission denied` | 数据目录属主不对：`chown -R fortune:fortune /var/lib/fortune-mcp` |
+| 多租户不生效（所有人同一份账） | 启动日志缺少 `多租户模式：凭据库 …`，检查 `FORTUNE_MULTI_TENANT=1` |
 | `login 失败：缺少密码` | `.env` 未加载；systemd 用 `EnvironmentFile`，手工启动需 `set -a; . .env; set +a` |
 | `接口错误 code=500 msg=…` | 下游业务校验失败，原文会透传在 `content.text` 里 |
 | Agent 不调用工具 | 工具描述被裁剪或名称冲突：确认 `tools/list` 返回 13 个工具，且后台勾选了这些工具 |
@@ -371,6 +381,45 @@ python3 /opt/fortune-mcp/useradmin.py import users.csv          # 批量导入
 | 会话频繁失效 | 负载均衡多实例但未做会话粘滞；单实例部署或开启粘滞（`Mcp-Session-Id`） |
 
 日志：`journalctl -u fortune-mcp -f`（用户级：`journalctl --user -u fortune-mcp -f`）。
+
+### 401 排查流程
+
+每次鉴权失败都会打印三行诊断，第一步永远是看这三行：
+
+```
+401 POST /mcp | Authorization=none | X-MCP-Token=no | query-keys=- | cookie=no | mode=introspect
+    headers: accept,content-length,content-type,host,x-oneid-access-token
+    user-agent: WorkBuddy/5.11.3
+```
+
+按 `headers` 行判断令牌有没有到达：
+
+| 观察 | 结论 | 处理 |
+|---|---|---|
+| 出现 `x-oneid-access-token` | 令牌已到达 | 问题在校验环节，看返回消息里的 `invalid_client` / `令牌无效` |
+| 只有标准头，无任何 token 字样 | 平台没有换出令牌 | 连接器认证方式选「自建应用免授权」，保存后重新发布 |
+| 出现 `authorization` | 走静态令牌或 Bearer | 核对 `MCP_AUTH_TOKEN` 与连接器 Header 值是否一致 |
+
+再看 `mode`：
+
+- `mode=introspect`：access_token 校验已启用，令牌会被交给平台校验
+- `mode=static`：`WB_*` 没读到，检查配置文件权限与三项凭据是否填齐
+
+返回消息也能辅助判断：
+
+| 消息 | 含义 |
+|---|---|
+| 只有「缺少或错误的 Bearer Token」 | 令牌没到服务端，`_identity_error` 为空 |
+| 「缺少或错误的 Bearer Token（introspect 返回 HTTP 401…）」 | 令牌到了，但 `client_id` / `client_secret` 不对 |
+| 「缺少或错误的 Bearer Token（令牌未通过 introspect 校验…）」 | 令牌已过期、被撤销，或不属于本企业 |
+
+命令行复核：
+
+```bash
+sudo -u fortune python3 /opt/fortune-mcp/server.py --check-identity '<access_token>'
+```
+
+`ok=true` 后看 `aliasField`（实际命中的字段）与 `boundUser`（绑定的凭据库键）；`boundUser` 为空说明身份通了但还没绑账套。
 
 ---
 

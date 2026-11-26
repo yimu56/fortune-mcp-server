@@ -39,6 +39,70 @@ from fortune_api import FortuneClient, FortuneError
 SERVER_NAME = fortune_tools.SERVER_NAME
 SERVER_VERSION = fortune_tools.SERVER_VERSION
 
+
+# ---------------------------------------------------------------------------
+# 环境变量文件加载
+# systemd 通过 EnvironmentFile 注入；命令行直接运行（--check-identity /
+# --self-check）时不会自动加载，需要自行读取，否则读不到 WB_* 与 MCP_*。
+# ---------------------------------------------------------------------------
+DEFAULT_ENV_FILES = (
+    os.environ.get("FORTUNE_ENV_FILE") or "/etc/fortune-mcp.env",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+    os.path.join(os.getcwd(), ".env"),
+)
+
+
+def _parse_env_line(line):
+    """解析一行 KEY=VALUE，返回 (key, value)；非赋值行返回 None。"""
+    text = line.strip()
+    if not text or text.startswith("#"):
+        return None
+    if text.startswith("export "):
+        text = text[7:].lstrip()
+    if "=" not in text:
+        return None
+    key, value = text.split("=", 1)
+    key = key.strip()
+    if not key or not key.replace("_", "").isalnum() or key[0].isdigit():
+        return None
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return key, value
+
+
+def load_env_files(explicit=None):
+    """把环境变量文件读入 os.environ，已存在的变量保持原值。
+
+    与 useradmin.py 中的同名函数保持解析规则、优先级一致，改动需同步。
+    """
+    candidates = []
+    if explicit:
+        path = os.path.abspath(explicit)
+        if not os.path.isfile(path):
+            raise SystemExit("环境变量文件不存在：%s" % path)
+        candidates.append(path)
+    candidates.extend(DEFAULT_ENV_FILES)
+    loaded, seen = [], set()
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+                for line in f:
+                    parsed = _parse_env_line(line)
+                    if parsed and parsed[0] not in os.environ:
+                        os.environ[parsed[0]] = parsed[1]
+        except OSError as exc:
+            if os.path.exists(path):
+                sys.stderr.write("[warn] 无法读取环境变量文件 %s：%s\n" % (path, exc))
+            continue
+        loaded.append(path)
+    return loaded
+
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07")
 LATEST_PROTOCOL = "2025-06-18"
 
@@ -553,7 +617,12 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- 鉴权 -------------------------------------------------------------
     def _bearer(self):
-        """取出调用方带来的令牌（Bearer / 裸 Authorization / X-MCP-Token / ?token=）。"""
+        """取出调用方带来的令牌。
+
+        支持的载体：Authorization: Bearer / 裸 Authorization /
+        X-Oneid-Access-Token（WorkBuddy 企业版自建应用免授权用这个头）/
+        X-MCP-Token / ?token= 与 ?access_token=。
+        """
         auth = (self.headers.get("Authorization") or "").strip()
         low = auth.lower()
         if low.startswith("bearer "):
@@ -563,11 +632,19 @@ class Handler(BaseHTTPRequestHandler):
         elif auth and not low.startswith(("basic ", "digest ", "negotiate ")):
             # 部分平台把令牌直接放进 Authorization，不带 Bearer 前缀
             return auth
+        for name in ("X-Oneid-Access-Token", "X-Access-Token", "X-Auth-Token"):
+            value = (self.headers.get(name) or "").strip()
+            if value:
+                return value
         given = (self.headers.get("X-MCP-Token") or "").strip()
         if given:
             return given
         qs = parse_qs(urlparse(self.path).query)
-        return ((qs.get("token") or [""])[0] or "").strip()
+        for name in ("token", "access_token"):
+            value = ((qs.get(name) or [""])[0] or "").strip()
+            if value:
+                return value
+        return ""
 
     def _authorized(self):
         cfg = self.app.cfg
@@ -615,12 +692,26 @@ class Handler(BaseHTTPRequestHandler):
             auth_kind = "bearer"
         else:
             auth_kind = "raw"
-        log("401 %s %s | Authorization=%s | X-MCP-Token=%s | query-token=%s | mode=%s"
+        query_keys = ",".join(sorted(parse_qs(urlparse(self.path).query).keys())) or "-"
+        header_names = ",".join(sorted({k.lower() for k in self.headers.keys()}))
+        log("401 %s %s | Authorization=%s | X-MCP-Token=%s | query-keys=%s | cookie=%s | mode=%s"
             % (self.command, urlparse(self.path).path, auth_kind,
                "yes" if (self.headers.get("X-MCP-Token") or "").strip() else "no",
-               "yes" if (parse_qs(urlparse(self.path).query).get("token") or [""])[0] else "no",
+               query_keys,
+               "yes" if self.headers.get("Cookie") else "no",
                "introspect" if self.app.cfg.introspect_enabled else "static"))
-        self._send_json(401, {"error": "unauthorized", "message": message})
+        log("    headers: %s" % (header_names or "-"))
+        log("    user-agent: %s" % (self.headers.get("User-Agent") or "-"))
+        # 401 时把请求体读掉，否则残留字节会被 HTTP 解析器当成下一个请求行，
+        # 日志里表现为 Bad request syntax 的 400
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if 0 < length <= 1048576:
+                self.rfile.read(length)
+        except (ValueError, OSError):
+            pass
+        self._send_json(401, {"error": "unauthorized", "message": message},
+                        {"Connection": "close"})
 
     def _identity_header(self):
         """多租户：按优先级找显式身份头（兼容前置网关注入 / 本地调试）。"""
@@ -823,10 +914,14 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- Streamable HTTP --------------------------------------------------
     def _request_meta(self, session):
-        """记录本次请求的头部快照（Authorization 只留前缀），供诊断工具读取。"""
+        """记录本次请求的头部快照（凭据类头只留前缀），供诊断工具读取。"""
+        # 凡可能携带令牌或凭据的头，一律打码后再回传，避免诊断工具成为泄露通道
+        sensitive = ("authorization", "x-oneid-access-token", "x-access-token",
+                     "x-auth-token", "x-mcp-token", "cookie",
+                     "x-fortune-password")
         headers = {}
         for key, value in self.headers.items():
-            if key.lower() == "authorization":
+            if key.lower() in sensitive:
                 text = value.strip()
                 headers[key] = (text[:12] + "…") if len(text) > 12 else "***"
             else:
@@ -1168,8 +1263,10 @@ def main():
                         help="检查配置与记账服务连通性后退出")
     parser.add_argument("--check-identity", metavar="TOKEN",
                         help="校验一个 WorkBuddy access_token 并打印解析出的身份后退出")
+    parser.add_argument("--env-file", help="环境变量文件（默认 /etc/fortune-mcp.env 或 .env）")
     args = parser.parse_args()
 
+    load_env_files(args.env_file)
     cfg = Config()
     if args.port:
         cfg.port = args.port

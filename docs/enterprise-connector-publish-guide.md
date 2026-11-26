@@ -237,10 +237,11 @@ curl -s -o /dev/null -w 'HTTP %{http_code}\n' \
 
 | 认证方式 | 上游收到 | 服务端配置 |
 |---|---|---|
-| **自建应用免授权**（推荐） | 每名员工的 `Authorization: Bearer <access_token>` | `WB_ACCOUNT_ID` / `WB_CLIENT_ID` / `WB_CLIENT_SECRET` 填齐即自动启用 |
+| **自建应用免授权**（推荐） | 每名员工的 `X-Oneid-Access-Token: <access_token>`（部分版本为 `Authorization: Bearer`） | `WB_ACCOUNT_ID` / `WB_CLIENT_ID` / `WB_CLIENT_SECRET` 填齐即自动启用 |
 | `API Key` / `Bearer Token` | 全员同一个静态令牌 | 仅单账号，做不到按人隔离 |
 
 > 只有「自建应用免授权」会把**员工本人**的身份传给上游；`API Key` 是连接器级固定凭据，所有人共用一份账。
+> 实测该方式使用 `X-Oneid-Access-Token` 头，请求里没有 `Authorization`；服务端两种载体都接受。
 > 选前者时按 README 第六节第 0 步配好三项凭据，可用 `server.py --check-identity '<token>'` 自检身份链路。
 
 再逐字段对照：
@@ -313,7 +314,7 @@ curl -s -o /dev/null -w 'HTTP %{http_code}\n' \
 | 报错 | 原因 | 处理 |
 |---|---|---|
 | 连接超时 / 无法访问 | 网络不通（第 2 章第 ③ 层） | 先解决网络；查防火墙、安全组、路由 |
-| **401 Unauthorized** | 令牌错 / 少了 `Bearer ` | 重取令牌；确认值是 `Bearer xxx` |
+| **401 Unauthorized** | 看服务端日志的三行诊断 | 出现 `x-oneid-access-token` 说明令牌已到达，查 introspect；无任何 token 类头说明平台没换出令牌，核对认证方式与发布状态 |
 | **404 Not Found** | URL 少了 `/mcp` 或有尾斜杠 | 用 `http://host:18088/mcp` |
 | **405 Method Not Allowed** | 平台用 GET 探测 `/mcp` | 正常（本服务 POST 才处理）；若平台强制 GET 握手，改 `/sse` |
 | 工具列表为空 | 没点同步 / 全部未勾选 | 重新“同步工具”，确认勾选 |
@@ -739,12 +740,12 @@ sudo bash uninstall.sh --yes --purge      # 彻底清除（配置、凭据库、
 传输：Streamable HTTP
 入口：http://fortune.example.com:18088/mcp        （SSE 备选：http://fortune.example.com:18088/sse）
 探活：http://fortune.example.com:18088/healthz    （免鉴权，返回 status=ok）
-鉴权：Authorization: Bearer <MCP_AUTH_TOKEN>
+鉴权：自建应用免授权（平台传 X-Oneid-Access-Token）；或静态令牌 Bearer <MCP_AUTH_TOKEN>
 工具数：13（7 只读 / 6 写入）；诊断开启时 14
 下游依赖：http://fortune.example.com:46031/prod-api（同主机，端口 46031）
 运行方式：systemd 服务 fortune-mcp，用户 fortune，监听 18088/tcp
 数据范围：测试账套，无真实个人金融数据
-多用户：支持，按请求头识别（默认 X-WorkBuddy-User > X-User-Id > X-Employee-Id）
+多用户：支持，按 access_token 解析出的 alias_id / username / sub 取凭据；也可识别身份头
 日志：journalctl -u fortune-mcp（调用摘要，不含密码与令牌）
 ```
 
@@ -789,7 +790,7 @@ sudo bash uninstall.sh --yes --purge
 |---|---|---|
 | `invalid option nameset: pipefail` | 脚本 CRLF | `sed -i 's/\r$//' *.sh` |
 | 后台“连接超时” | 平台到服务网络不通 | 第 2 章第 ③ 层；查防火墙/安全组/路由 |
-| 后台 **401** | 令牌错 / 少 `Bearer ` | 重取令牌，确认 `Bearer xxx` |
+| 后台 **401** | 令牌没到或校验失败 | 看服务端日志中 401 后面的 headers 清单，按 README 第九节「401 排查流程」处理 |
 | 后台 **404** | URL 少了 `/mcp` | `http://host:18088/mcp`，无尾斜杠 |
 | 后台 **405** | 平台 GET 探测 `/mcp` | 正常；必要时改 `/sse` |
 | 工具列表 0 个 | 未同步 / 未勾选 | 重新同步，勾选工具 |
