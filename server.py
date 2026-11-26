@@ -39,6 +39,20 @@ SERVER_VERSION = fortune_tools.SERVER_VERSION
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07")
 LATEST_PROTOCOL = "2025-06-18"
 
+# 仅在 MCP_DIAGNOSTIC=1 时出现在 tools/list 中，用于确认平台透传了哪些身份信息
+DIAGNOSTIC_TOOL = {
+    "name": "fortune_diagnostic",
+    "title": "诊断请求环境（管理员）",
+    "description": ("仅用于接入排障：返回本次调用收到的全部 HTTP 请求头、来源 IP、"
+                    "会话 ID，以及当前生效的记账账号（不含密码）。"
+                    "企业版连接器接入后调用一次，可确认平台是否透传了用户身份"
+                    "（如 X-User-Id、X-WorkBuddy-User、X-Employee-Id 等）。"),
+    "inputSchema": {"type": "object", "properties": {}},
+    "annotations": {"title": "诊断请求环境（管理员）", "readOnlyHint": True,
+                    "destructiveHint": False, "idempotentHint": True,
+                    "openWorldHint": False},
+}
+
 
 def log(msg):
     sys.stderr.write("[%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
@@ -61,7 +75,18 @@ class Config:
         self.tls_key = env("MCP_TLS_KEY") or ""
         self.session_ttl = int(env("MCP_SESSION_TTL") or 3600)
         self.debug = env("MCP_DEBUG") == "1"
+        self.diagnostic = env("MCP_DIAGNOSTIC") == "1"
         self.allow_header_cred = env("FORTUNE_ALLOW_HEADER_CRED") == "1"
+        self.multi_tenant = env("FORTUNE_MULTI_TENANT") == "1"
+        self.single_fallback = env("FORTUNE_SINGLE_FALLBACK") == "1"
+        self.user_headers = [h.strip() for h in (
+            env("MCP_USER_HEADERS")
+            or "X-WorkBuddy-User,X-User-Id,X-Employee-Id,X-Authenticated-User,Remote-User"
+        ).split(",") if h.strip()]
+        self.users_file = (env("FORTUNE_USERS_FILE")
+                           or "/var/lib/fortune-mcp/users.json")
+        self.cred_key = env("FORTUNE_CRED_KEY") or ""
+        self.cred_key_file = env("FORTUNE_CRED_KEY_FILE") or ""
         self.base_url = (env("FORTUNE_BASE_URL")
                          or "http://fortune.example.com:46031/prod-api").rstrip("/")
         self.username = env("FORTUNE_USERNAME") or ""
@@ -79,7 +104,9 @@ class Config:
         return {"baseUrl": self.base_url,
                 "username": self.username or "(未配置)",
                 "authRequired": bool(self.auth_token),
-                "headerCred": self.allow_header_cred}
+                "headerCred": self.allow_header_cred,
+                "multiTenant": self.multi_tenant,
+                "userHeaders": self.user_headers if self.multi_tenant else []}
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +146,9 @@ class Session:
         self.touched = time.time()
         self.queue = queue.Queue()
         self.closed = False
+        self.request_meta = {}  # 最近一次请求的头部快照，供诊断工具使用
+        self.platform_user = None
+        self.cred_error = None
 
 
 class SessionStore:
@@ -197,7 +227,7 @@ class Engine:
             return self._ok(msg_id, {})
 
         if method == "tools/list":
-            return self._ok(msg_id, {"tools": fortune_tools.TOOLS})
+            return self._ok(msg_id, {"tools": self.tools()})
 
         if method == "tools/call":
             return self._call_tool(msg_id, params, session)
@@ -219,9 +249,26 @@ class Engine:
     def _ok(self, msg_id, result):
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
+    def tools(self):
+        tools = list(fortune_tools.TOOLS)
+        if self.cfg.diagnostic:
+            tools.append(DIAGNOSTIC_TOOL)
+        return tools
+
     def _call_tool(self, msg_id, params, session):
         name = params.get("name")
         arguments = params.get("arguments") or {}
+        if name == DIAGNOSTIC_TOOL["name"]:
+            if not self.cfg.diagnostic:
+                return self._ok(msg_id, self._error_result(
+                    "诊断工具未启用：设置 MCP_DIAGNOSTIC=1 后重启服务"))
+            return self._ok(msg_id, self._tool_result(dict(session.request_meta),
+                                                      session))
+        if session.creds is None:
+            who = session.platform_user or "未识别"
+            log("audit user=%s tool=%s -> 拒绝（%s）" % (who, name, session.cred_error))
+            return self._ok(msg_id, self._error_result(
+                session.cred_error or "未能识别当前用户，请管理员检查连接器配置"))
         try:
             client = self.pool.get(session.creds)
             payload, _ = fortune_tools.call_tool(client, name, arguments)
@@ -229,21 +276,33 @@ class Engine:
             text = "调用失败：%s" % exc
             if exc.response:
                 text += "\n" + json.dumps(exc.response, ensure_ascii=False)[:600]
-            log("工具 %s 失败: %s" % (name, exc))
+            log("audit user=%s fortune=%s tool=%s fail=%s"
+                % (session.platform_user or "-",
+                   (session.creds or {}).get("username") or "-", name, exc))
             return self._ok(msg_id, self._error_result(text))
         except Exception as exc:  # noqa: BLE001
-            log("工具 %s 异常: %r" % (name, exc))
+            log("audit user=%s fortune=%s tool=%s error=%r"
+                % (session.platform_user or "-",
+                   (session.creds or {}).get("username") or "-", name, exc))
             if self.cfg.debug:
                 import traceback
                 traceback.print_exc(file=sys.stderr)
             return self._ok(msg_id, self._error_result("服务端异常：%s" % exc))
 
+        log("audit user=%s fortune=%s tool=%s ok"
+            % (session.platform_user or "-",
+               (session.creds or {}).get("username") or "-", name))
+        result = self._tool_result(payload, session)
+        return self._ok(msg_id, result)
+
+    @staticmethod
+    def _tool_result(payload, session):
         result = {"content": [{"type": "text",
                                "text": json.dumps(payload, ensure_ascii=False, indent=2)}],
                   "isError": False}
         if session.protocol >= "2025-06-18":
             result["structuredContent"] = payload
-        return self._ok(msg_id, result)
+        return result
 
     @staticmethod
     def _error_result(text):
@@ -330,26 +389,56 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(401, {"error": "unauthorized",
                               "message": "缺少或错误的 Bearer Token"})
 
-    def _creds(self):
+    def _resolve_identity(self):
+        """解析本次请求的身份，返回 (platform_user, creds, error_message)。"""
         cfg = self.app.cfg
-        creds = cfg.default_creds()
-        if cfg.allow_header_cred:
-            user = (self.headers.get("X-Fortune-Username") or "").strip()
-            pwd = self.headers.get("X-Fortune-Password") or ""
-            base = (self.headers.get("X-Fortune-Base-Url") or "").strip()
-            if user:
-                creds["username"] = user
-                creds["password"] = pwd
-                creds["token"] = ""
-            if base:
-                creds["base_url"] = base.rstrip("/")
+        if self.app.identity is None:               # 单账号模式
+            return None, self._header_override(cfg.default_creds()), None
+
+        user = ""
+        for name in cfg.user_headers:               # 多租户：按优先级找身份头
+            value = (self.headers.get(name) or "").strip()
+            if value:
+                user = value
+                break
+        if not user:
+            if cfg.single_fallback:
+                return None, cfg.default_creds(), None
+            return None, None, (
+                "未能识别当前用户身份：请求里没有 %s 任一请求头。\n"
+                "请让管理员确认企业版连接器是否开启「用户身份透传」；"
+                "临时排障可设 FORTUNE_SINGLE_FALLBACK=1 退回单账号模式。"
+                % " / ".join(cfg.user_headers))
+        try:
+            return user.lower(), self.app.identity.creds_for(user), None
+        except Exception as exc:  # noqa: BLE001
+            return user.lower(), None, str(exc)
+
+    def _header_override(self, creds):
+        """单账号模式下可选的凭据覆盖（FORTUNE_ALLOW_HEADER_CRED=1 时生效）。"""
+        if not self.app.cfg.allow_header_cred:
+            return creds
+        user = (self.headers.get("X-Fortune-Username") or "").strip()
+        if user:
+            creds["username"] = user
+            creds["password"] = self.headers.get("X-Fortune-Password") or ""
+            creds["token"] = ""
+        base = (self.headers.get("X-Fortune-Base-Url") or "").strip()
+        if base:
+            creds["base_url"] = base.rstrip("/")
         return creds
+
+    def _bind_identity(self, session):
+        user, creds, error = self._resolve_identity()
+        session.platform_user = user
+        session.creds = creds
+        session.cred_error = error
 
     def _session(self, create_if_missing=True):
         sid = self.headers.get("Mcp-Session-Id")
         sess = self.app.sessions.get(sid)
         if sess is None and create_if_missing:
-            sess = self.app.sessions.create(self._creds())
+            sess = self.app.sessions.create(self.app.cfg.default_creds())
         if sess:
             # 无状态客户端靠 MCP-Protocol-Version 头声明协议版本
             version = self.headers.get("MCP-Protocol-Version")
@@ -373,7 +462,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "status": "ok", "server": SERVER_NAME, "version": SERVER_VERSION,
                 "protocols": list(SUPPORTED_PROTOCOLS),
-                "tools": len(fortune_tools.TOOLS),
+                "tools": len(self.app.engine.tools()),
                 "sessions": len(getattr(self.server.app, "sessions")._sessions),
                 "config": self.app.cfg.summary(),
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -435,6 +524,48 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not_found"})
 
     # ---- Streamable HTTP --------------------------------------------------
+    def _request_meta(self, session):
+        """记录本次请求的头部快照（Authorization 只留前缀），供诊断工具读取。"""
+        headers = {}
+        for key, value in self.headers.items():
+            if key.lower() == "authorization":
+                text = value.strip()
+                headers[key] = (text[:12] + "…") if len(text) > 12 else "***"
+            else:
+                headers[key] = value
+        by_header = bool((self.headers.get("X-Fortune-Username") or "").strip())
+        cfg = self.app.cfg
+        creds = session.creds or {}
+        if cfg.multi_tenant:
+            source = "多租户凭据库（%s）" % cfg.users_file if creds else "未识别"
+        elif by_header and cfg.allow_header_cred:
+            source = "请求头覆盖"
+        else:
+            source = "服务端 .env"
+        return {
+            "clientIp": self.client_address[0] if self.client_address else None,
+            "method": self.command,
+            "path": self.path,
+            "httpVersion": self.request_version,
+            "headers": headers,
+            "sessionId": session.sid,
+            "protocolVersion": session.protocol,
+            "multiTenant": cfg.multi_tenant,
+            "platformUser": session.platform_user,
+            "identityHeaders": {name: self.headers.get(name)
+                                for name in cfg.user_headers
+                                if self.headers.get(name)},
+            "credentialInUse": {
+                "baseUrl": creds.get("base_url"),
+                "username": creds.get("username"),
+                "source": source,
+            },
+            "credentialError": session.cred_error,
+            "hint": ("请求头里如果出现稳定的用户标识（如 X-User-Id / X-WorkBuddy-User / "
+                     "X-Employee-Id），说明平台支持身份透传，可据此实现按人隔离账套；"
+                     "如果只有固定的 Authorization 与 UA，则平台未透传身份。"),
+        }
+
     def _handle_streamable(self):
         raw = self._read_body()
         try:
@@ -449,6 +580,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         session = self._session()
+        self._bind_identity(session)
+        session.request_meta = self._request_meta(session)
         is_init = isinstance(payload, dict) and payload.get("method") == "initialize"
         headers = {"Mcp-Session-Id": session.sid}
 
@@ -515,6 +648,8 @@ class Handler(BaseHTTPRequestHandler):
         if session is None:
             self._send_json(404, {"error": "session_not_found", "sessionId": sid})
             return
+        self._bind_identity(session)
+        session.request_meta = self._request_meta(session)
         raw = self._read_body()
         try:
             payload = json.loads(raw) if raw.strip() else None
@@ -539,6 +674,8 @@ def run_stdio(cfg, pool):
     engine = Engine(cfg, pool)
     store = SessionStore(cfg.session_ttl)
     session = store.create(cfg.default_creds())
+    if cfg.multi_tenant:
+        log("stdio 模式无 HTTP 请求头，多租户不可用；本次沿用 .env 中的单账号")
     log("stdio 模式启动，工具数: %d，目标: %s" % (len(fortune_tools.TOOLS), cfg.base_url))
 
     def send(obj):
@@ -572,6 +709,22 @@ class App:
         self.pool = ClientPool(cfg)
         self.engine = Engine(cfg, self.pool)
         self.sessions = SessionStore(cfg.session_ttl)
+        self.identity = load_identity(cfg)
+
+
+def load_identity(cfg):
+    """多租户模式下加载凭据库；否则返回 None（沿用 .env 里的单账号）。"""
+    if not cfg.multi_tenant:
+        return None
+    from user_store import UserStore
+    store = UserStore(path=cfg.users_file,
+                      key_text=cfg.cred_key or None,
+                      key_file=cfg.cred_key_file or None,
+                      base_url=cfg.base_url)
+    log("多租户模式：凭据库 %s（已绑定 %d 人）"
+        % (store.path, len(store.platform_users())))
+    log("  身份头优先级：%s" % " > ".join(cfg.user_headers))
+    return store
 
 
 def sweep_loop(app, httpd):

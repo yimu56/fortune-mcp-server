@@ -63,7 +63,7 @@ raise SystemExit(0 if sys.version_info >= (3, 8) else 1)
 EOF
 info "Python: $($PY -V 2>&1)"
 
-for f in server.py fortune_api.py fortune_tools.py uninstall.sh; do
+for f in server.py fortune_api.py fortune_tools.py user_store.py useradmin.py uninstall.sh; do
     [ -f "$SRC_DIR/$f" ] || die "缺少文件 $SRC_DIR/$f（请在解压后的目录内执行本脚本）"
 done
 
@@ -72,8 +72,12 @@ gen_token() { "$PY" -c 'import secrets; print(secrets.token_urlsafe(32))'; }
 # ---------------------------------------------------------------- 复制程序
 mkdir -p "$APP_DIR"
 cp -f "$SRC_DIR/server.py" "$SRC_DIR/fortune_api.py" "$SRC_DIR/fortune_tools.py" \
-      "$SRC_DIR/smoke_test.py" "$SRC_DIR/uninstall.sh" "$APP_DIR/"
+      "$SRC_DIR/smoke_test.py" "$SRC_DIR/user_store.py" "$SRC_DIR/useradmin.py" \
+      "$SRC_DIR/uninstall.sh" "$APP_DIR/"
 chmod +x "$APP_DIR/uninstall.sh" 2>/dev/null || true
+if [ -f "$SRC_DIR/deploy/add-tenant.sh" ]; then
+    cp -f "$SRC_DIR/deploy/add-tenant.sh" "$APP_DIR/"; chmod +x "$APP_DIR/add-tenant.sh" 2>/dev/null || true
+fi
 info "程序已复制到 $APP_DIR"
 
 if [ $IS_ROOT -eq 1 ]; then
@@ -113,12 +117,19 @@ MCP_PATH=/mcp
 MCP_AUTH_TOKEN=${TOKEN}
 MCP_SESSION_TTL=3600
 MCP_DEBUG=0
+MCP_DIAGNOSTIC=0
 FORTUNE_ALLOW_HEADER_CRED=0
+
+# ===== 多用户隔离（每人一个记账账号）=====
+# 开启后按请求头识别用户，再到凭据库里取各自的记账账号
+# FORTUNE_MULTI_TENANT=1
+# FORTUNE_USERS_FILE=/var/lib/fortune-mcp/users.json
+# MCP_USER_HEADERS=X-WorkBuddy-User,X-User-Id,X-Employee-Id,X-Authenticated-User
+# FORTUNE_SINGLE_FALLBACK=0
 EOF
     umask 022
     [ $IS_ROOT -eq 1 ] && chown "$RUN_USER":"$RUN_USER" "$ENV_FILE" && chmod 600 "$ENV_FILE"
     info "已生成配置 $ENV_FILE（令牌为随机生成，见文末）"
-    warn "账号与密码为占位符 CHANGE_ME，请先编辑 $ENV_FILE 填入实际值，否则登录会失败"
 fi
 
 # ---------------------------------------------------------------- systemd
@@ -247,6 +258,12 @@ cat <<EOF
  兼容 SSE 地址 http://${LAN_IP}:${PORT}/sse
  鉴权方式      Bearer Token
  令牌          ${TOKEN}
+
+ 多用户隔离（可选）
+   开启：编辑 ${ENV_FILE}，取消 FORTUNE_MULTI_TENANT 等注释后重启
+   加人：python3 ${APP_DIR}/useradmin.py menu      # 交互式菜单，跟着提示填（推荐）
+         或：echo '密码' | python3 ${APP_DIR}/useradmin.py add --user demo_user --fortune-user demo_user --password-stdin
+   查看：python3 ${APP_DIR}/useradmin.py list
 
  本机自检
    python3 ${APP_DIR}/smoke_test.py http://127.0.0.1:${PORT}/mcp '${TOKEN}' --write

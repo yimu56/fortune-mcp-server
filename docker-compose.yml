@@ -2,7 +2,7 @@
 services:
   fortune-mcp:
     build: .
-    image: fortune-mcp:2.0.0
+    image: fortune-mcp:3.0.0
     container_name: fortune-mcp
     restart: unless-stopped
     env_file:

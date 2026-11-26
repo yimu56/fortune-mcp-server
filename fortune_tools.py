@@ -7,7 +7,7 @@ from datetime import datetime
 from fortune_api import FortuneError
 
 SERVER_NAME = "fortune-bookkeeping"
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "3.0.0"
 
 INSTRUCTIONS = """\
 本服务连接 Fortune 记账系统，可查询账户余额、账本、分类、收付款方与标签，并新增支出、收入、转账与账户。
@@ -51,7 +51,13 @@ def _resolve_book(client, group_id, value=None):
     if value is not None:
         bid = _as_id(value)
         if bid is not None:
-            return bid, next((b for b in books if b.get("bookId") == bid), None)
+            match = next((b for b in books if b.get("bookId") == bid), None)
+            if match is None:
+                raise FortuneError(
+                    "账本 %s 不属于当前用户的当前分组；可用账本：%s"
+                    % (value, ", ".join("%s(%s)" % (b.get("bookName"), b.get("bookId"))
+                                        for b in books) or "无"))
+            return bid, match
         for b in books:
             if str(value) == b.get("bookName"):
                 return b["bookId"], b
@@ -66,6 +72,12 @@ def _resolve_account(client, group_id, value):
     aid = _as_id(value)
     if aid is not None:
         match = next((a for a in accounts if a.get("accountId") == aid), None)
+        if match is None:
+            # 关键安全校验：下游服务端不校验账户归属，必须在代理层拦住跨用户写入
+            raise FortuneError(
+                "账户 %s 不属于当前用户；可用账户：%s"
+                % (value, ", ".join("%s(%s)" % (a.get("accountName"), a.get("accountId"))
+                                    for a in accounts) or "无"))
         return aid, match
     text = str(value or "").strip()
     if not text:
@@ -92,6 +104,11 @@ def _resolve_category(client, book_id, bill_type, value):
     categories = _flatten_categories(client.get_categories(book_id, bill_type))
     cid = _as_id(value)
     if cid is not None:
+        if not any(c.get("categoryId") == cid for c in categories):
+            raise FortuneError(
+                "分类 %s 不属于当前账本；可用分类：%s"
+                % (value, ", ".join("%s(%s)" % (c.get("categoryName"), c.get("categoryId"))
+                                    for c in categories) or "无"))
         return cid
     text = str(value or "").strip()
     for c in categories:
@@ -102,6 +119,30 @@ def _resolve_category(client, book_id, bill_type, value):
             return c["categoryId"]
     names = ", ".join(str(c.get("categoryName")) for c in categories)
     raise FortuneError(f"未找到分类: {value}；可用分类: {names}")
+
+
+def _validate_tags(client, book_id, bill_type, tag_ids):
+    """校验标签属于当前账本，防止跨账套引用。"""
+    if not tag_ids:
+        return []
+    valid = {t.get("tagId") for t in _flatten_categories(client.get_tags(book_id, bill_type))}
+    bad = [t for t in tag_ids if t not in valid]
+    if bad:
+        raise FortuneError("标签 %s 不属于当前账本；可用标签：%s"
+                           % (bad, ", ".join(str(v) for v in sorted(valid)) or "无"))
+    return tag_ids
+
+
+def _validate_payee(client, book_id, bill_type, payee_id):
+    """校验收付款方属于当前账本。"""
+    if payee_id is None:
+        return None
+    payees = client.get_payees(book_id, bill_type) or []
+    if not any(p.get("payeeId") == payee_id for p in payees):
+        raise FortuneError("收付款方 %s 不属于当前账本；可用：%s"
+                           % (payee_id,
+                              ", ".join(str(p.get("payeeName")) for p in payees) or "无"))
+    return payee_id
 
 
 def _positive_amount(value):
@@ -249,7 +290,9 @@ def _add_bill_common(client, args, bill_type):
         if isinstance(tag_ids, (str, int)):
             tag_ids = [tag_ids]
         tag_ids = [_as_id(t) for t in tag_ids if _as_id(t) is not None]
-        payee_id = _as_id(args.get("payee_id"))
+        tag_ids = _validate_tags(client, book_id, bill_type, tag_ids)
+        payee_id = _validate_payee(client, book_id, bill_type,
+                                   _as_id(args.get("payee_id")))
         result = client.add_bill(
             book_id, bill_type, title, trade_time, account_id,
             [{"categoryId": category_id, "amount": amount}],
@@ -279,29 +322,60 @@ def tool_add_transfer(client, args):
 
 
 def tool_add_bill(client, args):
-    """高级通用接口：直接传原始账单字段（支持多分类分摊、orderId）。"""
+    """高级通用接口：直接传原始账单字段（支持多分类分摊、orderId）。
+
+    所有 ID 都会先校验归属（账本/账户/分类/标签/收付款方），
+    避免把别人的数据 ID 混进来。
+    """
     client.ensure_login()
     required = ["book_id", "bill_type", "title", "trade_time", "account_id"]
     missing = [k for k in required if args.get(k) is None]
     if missing:
         raise FortuneError("缺少参数: " + ", ".join(missing))
     bill_type = int(args["bill_type"])
-    pairs = args.get("category_amount_pair") or []
+    if bill_type not in (1, 2, 3):
+        raise FortuneError("bill_type 必须是 1(支出)/2(收入)/3(转账)")
+
+    gid = _resolve_group(client, args.get("group_id"))
+    book_id, _ = _resolve_book(client, gid, int(args["book_id"]))
+    account_id, _ = _resolve_account(client, gid, int(args["account_id"]))
+
+    to_account_id = None
+    if args.get("to_account_id") is not None:
+        to_account_id, _ = _resolve_account(client, gid, _as_id(args["to_account_id"]))
+        if to_account_id == account_id:
+            raise FortuneError("转出账户与转入账户不能相同")
+
+    pairs = []
     amount = args.get("amount")
     if bill_type == 3:
         amount = _positive_amount(amount)
     else:
-        if not pairs:
+        raw_pairs = args.get("category_amount_pair") or []
+        if not raw_pairs:
             raise FortuneError("支出/收入必须提供 category_amount_pair")
+        for item in raw_pairs:
+            item = item or {}
+            cid = _as_id(item.get("categoryId"))
+            if cid is None:
+                raise FortuneError("category_amount_pair 中存在无效的 categoryId")
+            _resolve_category(client, book_id, bill_type, cid)  # 归属校验
+            pairs.append({"categoryId": cid,
+                          "amount": _positive_amount(item.get("amount"))})
         amount = None
+
+    tag_ids = [_as_id(t) for t in (args.get("tag_id_list") or [])
+               if _as_id(t) is not None]
+    tag_ids = _validate_tags(client, book_id, bill_type, tag_ids)
+    payee_id = _validate_payee(client, book_id, bill_type, _as_id(args.get("payee_id")))
+
     result = client.add_bill(
-        book_id=int(args["book_id"]), bill_type=bill_type,
+        book_id=book_id, bill_type=bill_type,
         title=str(args["title"]), trade_time=str(args["trade_time"]),
-        account_id=int(args["account_id"]),
+        account_id=account_id,
         category_amount_pair=pairs, amount=amount,
-        to_account_id=_as_id(args.get("to_account_id")),
-        tag_id_list=args.get("tag_id_list") or [],
-        payee_id=_as_id(args.get("payee_id")),
+        to_account_id=to_account_id,
+        tag_id_list=tag_ids, payee_id=payee_id,
         order_id=_as_id(args.get("order_id")),
         confirm=bool(args.get("confirm", True)),
         include=bool(args.get("include", True)),
@@ -462,6 +536,7 @@ TOOLS = [
                         "fortune_add_expense / fortune_add_income / fortune_add_transfer "
                         "无法满足需求时使用。"),
         "inputSchema": {"type": "object", "properties": {
+            "group_id": {"type": ["integer", "string"], "description": "分组 ID，省略则用默认分组"},
             "book_id": {"type": "integer", "description": "账本 ID，必填"},
             "bill_type": {"type": "integer", "enum": [1, 2, 3], "description": "1=支出 2=收入 3=转账，必填"},
             "title": {"type": "string", "description": "标题，必填"},

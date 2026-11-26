@@ -9,7 +9,8 @@ ENV PYTHONUNBUFFERED=1 \
     FORTUNE_TOKEN_CACHE_DIR=/data
 
 WORKDIR /app
-COPY server.py fortune_api.py fortune_tools.py smoke_test.py healthcheck.py ./
+COPY server.py fortune_api.py fortune_tools.py user_store.py useradmin.py \
+     smoke_test.py healthcheck.py ./
 
 RUN useradd -r -u 10001 -s /sbin/nologin fortune \
     && mkdir -p /data && chown -R fortune:fortune /data /app

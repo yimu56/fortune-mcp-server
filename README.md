@@ -6,8 +6,8 @@
 - 传输协议：**Streamable HTTP**（推荐，`POST /mcp`）+ **旧版 HTTP+SSE**（兼容）
 - 同时支持 **stdio** 模式（本地 `mcp.json` 调试）
 - 工具数：**13 个**（查询账户/账本/分类/标签/收付款方 + 记账/转账/建账户）
-- 默认下游地址：`http://fortune.example.com:46031/prod-api`（占位示例，部署时须按实际环境覆盖）
-- 当前版本：**v2.0.0**（首个公开发布版本）
+- 默认下游地址：`http://fortune.example.com:46031/prod-api`（可用 `FORTUNE_BASE_URL` 覆盖）
+- 当前版本：**v3.0.0**（与 `SERVER_VERSION`、Docker 镜像标签及发布标签一致）
 
 ---
 
@@ -18,6 +18,8 @@ fortune-mcp-server/
 ├── server.py                     # 服务入口：HTTP + SSE + stdio
 ├── fortune_api.py                # 记账系统 HTTP 客户端（含手写 RSA 加密登录）
 ├── fortune_tools.py              # 13 个 MCP 工具定义与实现
+├── user_store.py                 # 多租户凭据库（加密存储 平台用户→记账账号）
+├── useradmin.py                  # 凭据库管理 CLI（add/list/disable/import）
 ├── smoke_test.py                 # 冒烟测试（可在服务器上直接跑）
 ├── healthcheck.py                # 容器健康检查
 ├── install.sh                    # 一键安装（systemd / 用户级服务）
@@ -25,13 +27,14 @@ fortune-mcp-server/
 ├── .env.example                  # 配置样例
 ├── Dockerfile / docker-compose.yml
 ├── deploy/
+│   ├── add-tenant.sh             # 「一人一实例」批量加人脚本
 │   ├── fortune-mcp.service       # systemd 单元参考
 │   └── nginx-fortune-mcp.conf    # HTTPS 反代参考（SSE 安全配置）
 ├── README.md                     # 本文
 ├── CHANGELOG.md                  # 版本变更记录
 ├── LICENSE                       # MIT 许可（Copyright (c) 2026 yimu56）
 ├── .gitignore                    # 忽略本地配置与缓存
-└── docs/enterprise-connector-publish-guide.md    # 后台发布步骤 + 验收清单
+└── docs/enterprise-connector-publish-guide.md    # 实施手册：部署→后台发布→验收→多用户→运维
 ```
 
 ---
@@ -44,8 +47,8 @@ fortune-mcp-server/
 
 ```bash
 # 方式一：scp 上传整个目录
-scp -r fortune-mcp-server user@<服务器地址>:/tmp/
-ssh user@<服务器地址>
+scp -r fortune-mcp-server user@fortune.example.com:/tmp/
+ssh user@fortune.example.com
 cd /tmp/fortune-mcp-server && sudo bash install.sh
 
 # 方式二：已在服务器上，直接解压执行
@@ -108,7 +111,7 @@ python3 /opt/fortune-mcp/smoke_test.py http://127.0.0.1:18088/mcp '<TOKEN>' --wr
   · initialize  ok  protocol=2025-06-18 session=...
   · tools/list  ok  共 13 个工具
   · fortune_context  ok  group=5 book=11 账户=2
-  · fortune_add_transfer  ok  余额已复原 (100.00 / 50.00)
+  · fortune_add_transfer  ok  余额已复原 (74.99 / 25.01)
 全部通过 ✔
 ```
 
@@ -196,13 +199,83 @@ curl -s -X POST http://127.0.0.1:18088/mcp \
 | `MCP_PATH` | `/mcp` | Streamable HTTP 路径 |
 | `MCP_AUTH_TOKEN` | 空 | **生产必填**，Bearer 令牌；为空时启动日志会告警 |
 | `MCP_SESSION_TTL` | `3600` | 会话空闲回收秒数 |
+| `FORTUNE_MULTI_TENANT` | `0` | 置 1 开启多用户隔离，按身份头取各自凭据 |
+| `FORTUNE_USERS_FILE` | `/var/lib/fortune-mcp/users.json` | 凭据库路径 |
+| `MCP_USER_HEADERS` | `X-WorkBuddy-User,X-User-Id,…` | 身份头候选，按顺序取第一个非空 |
+| `FORTUNE_SINGLE_FALLBACK` | `0` | 认不出身份时是否退回单账号（默认不退回，避免记错账） |
+| `FORTUNE_CRED_KEY` | 空 | 凭据加密密钥（hex/base64）；留空自动生成 `users.json.key` |
 | `FORTUNE_ALLOW_HEADER_CRED` | `0` | 置 1 允许 `X-Fortune-Username/Password/Base-Url` 头覆盖账号（多用户共用一个连接器） |
 | `MCP_TLS_CERT` / `MCP_TLS_KEY` | 空 | 服务自身启用 HTTPS（前面没有 nginx 时用） |
 | `MCP_DEBUG` | `0` | 打印异常堆栈 |
+| `MCP_DIAGNOSTIC` | `0` | 置 1 暴露 `fortune_diagnostic`，用于查看平台透传的请求头 |
 
 ---
 
-## 六、13 个工具
+## 六、多用户隔离（每人一个账套）
+
+默认是**单账号**：服务端只持有一组 `.env` 凭据，所有人看到同一份数据。
+要让每人只看到自己的账，开启多租户——**同一个连接器、同一份配置**，按调用方身份取各自的记账凭据。
+
+**前提**：记账系统里每人有独立账号；企业版连接器能把当前用户身份传过来（见第七节诊断工具）。
+
+### 1. 开启
+
+```bash
+# 方式一：交互式菜单（推荐，逐项提示 + 保存前确认 + 可立即验证登录）
+python3 /opt/fortune-mcp/useradmin.py menu
+
+# 方式二：脚本化（密码从标准输入读，不进 shell 历史）
+echo '记账密码' | python3 /opt/fortune-mcp/useradmin.py add \
+    --user demo_user --fortune-user demo_user --note '示例用户/研发部' --password-stdin
+
+# 打开开关
+sudo sed -i 's/^#*\s*FORTUNE_MULTI_TENANT=.*/FORTUNE_MULTI_TENANT=1/' /etc/fortune-mcp.env
+sudo systemctl restart fortune-mcp
+```
+
+### 2. 日常管理
+
+```bash
+python3 /opt/fortune-mcp/useradmin.py menu                 # 交互式菜单（增删改查都在里面）
+python3 /opt/fortune-mcp/useradmin.py list                 # 查看全部映射
+python3 /opt/fortune-mcp/useradmin.py disable --user demo_user   # 离职/停用
+python3 /opt/fortune-mcp/useradmin.py remove  --user demo_user   # 删除
+python3 /opt/fortune-mcp/useradmin.py template > users.csv      # CSV 模板
+python3 /opt/fortune-mcp/useradmin.py import users.csv          # 批量导入
+```
+
+凭据库改动**不需要重启**（每次调用都重新读取）。
+
+### 3. 行为约定
+
+| 场景 | 服务端行为 |
+|---|---|
+| 身份头缺失 | 返回“未能识别当前用户身份”，**不会**落到别人账上 |
+| 用户未绑定 | 返回可直接执行的 `useradmin.py add ...` 命令 |
+| 用户已停用 | 返回“账号已被停用，请联系管理员” |
+| 身份头命中多值 | 按 `MCP_USER_HEADERS` 顺序取第一个非空 |
+| 传了别人的账户/分类/标签/账本 ID | 直接拒绝并列出本账号可用的 ID |
+
+身份头候选（默认）：`X-WorkBuddy-User > X-User-Id > X-Employee-Id > X-Authenticated-User > Remote-User`，
+可用 `MCP_USER_HEADERS` 改成平台实际使用的头名。
+
+### 4. 安全
+
+- 凭据库里**不存明文**：HMAC-SHA256 派生密钥流加密 + 加密后再 MAC，逐条 16 字节随机 nonce。
+- 密钥来自 `FORTUNE_CRED_KEY`（推荐 KMS/Vault 注入），留空则自动生成 `users.json.key`（0600）。
+- `users.json` 权限 0600，仅运行用户可读。
+- 每次工具调用都写一行审计：`audit user=demo_user fortune=demo_user tool=fortune_add_expense ok`。
+- 密钥丢失 = 凭据库不可解，只能重新导入；请把 `.key` 纳入备份。
+
+### 5. 平台不透传身份怎么办
+
+先跑第七节的诊断工具确认。若确实没有任何身份头，两条退路：
+**一人一实例**（`install.sh --port` 多跑几次，后台建多个连接器）或
+**本地 stdio 连接器**（每人自己机器配自己账号，见第八节）。
+
+---
+
+## 七、13 个工具
 
 | 工具 | 类型 | 用途 |
 |---|---|---|
@@ -217,12 +290,14 @@ curl -s -X POST http://127.0.0.1:18088/mcp \
 | `fortune_add_bill` | 写入 | 高级接口：多分类分摊、orderId |
 | `fortune_login` | 写入 | 手动刷新令牌（一般无需调用） |
 
+**诊断工具（默认关闭）**：设置 `MCP_DIAGNOSTIC=1` 后会多出第 14 个工具 `fortune_diagnostic`，返回本次调用的完整请求头快照、来源 IP、会话 ID 与当前生效账号（不含密码）。企业版连接器接入后调用它一次，就能确认平台是否透传了用户身份——这是判断能不能做“按人隔离账套”的关键依据。生产环境验证完请改回 `0`。
+
 每个工具都带 `annotations`（`readOnlyHint` / `destructiveHint` / `idempotentHint`），
 企业后台做只读授权、风险提示时可以直接用。
 
 ---
 
-## 七、本地 stdio 调试（桌面客户端）
+## 八、本地 stdio 调试（桌面客户端）
 
 `~/.workbuddy/mcp.json`（Windows 用户目录为 `C:\Users\<用户名>\.workbuddy\mcp.json`）：
 
@@ -246,7 +321,7 @@ curl -s -X POST http://127.0.0.1:18088/mcp \
 
 ---
 
-## 八、排错
+## 九、排错
 
 | 现象 | 原因 / 处理 |
 |---|---|
@@ -264,20 +339,14 @@ curl -s -X POST http://127.0.0.1:18088/mcp \
 
 ---
 
-## 九、安全建议
+## 十、安全建议
 
 1. **必须设置 `MCP_AUTH_TOKEN`**，长度 ≥ 32 位随机串；令牌泄露等于记账权限泄露。
 2. 不要把 `46031` 端口或本服务直接暴露到公网；前置 nginx + HTTPS + 出口 IP 白名单。
 3. `.env` / `/etc/fortune-mcp.env` 权限 600，仅运行用户可读。
 4. 生产建议关掉 `MCP_DEBUG`，日志只留调用摘要。
-5. 下游业务系统自身的权限校验不要绕过——本服务只是代理层。
-6. 定期轮换令牌：改 `MCP_AUTH_TOKEN` → `systemctl restart fortune-mcp` → 同步更新连接器配置。
-
----
-
-## 十、版本与许可
-
-- 当前版本：**v2.0.0**，与 `SERVER_VERSION`、Docker 镜像标签及发布标签一致。
-- 变更记录：见 [CHANGELOG.md](CHANGELOG.md)。
-- 许可：MIT，详见 [LICENSE](LICENSE)，版权署名 `yimu56`。
-- 发布提醒：提交前确认 `.env`、`*.env.bak` 等本地配置未被纳入版本库（见 [.gitignore](.gitignore)）。
+5. **所有 ID 都做归属校验**：账户 / 分类 / 标签 / 收付款方 / 账本在写入前都会核对该用户自己的数据，
+   不匹配即拒绝。原因很实在——实测发现下游服务端**不校验账户是否属于该账本**，
+   若代理层不拦，任何人填一个别人的账户 ID 就能扣到对方账上（已修复并加回归测试）。
+6. 下游业务系统自身的权限校验不要绕过——本服务只是代理层。
+7. 定期轮换令牌：改 `MCP_AUTH_TOKEN` → `systemctl restart fortune-mcp` → 同步更新连接器配置。
