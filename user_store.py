@@ -38,6 +38,26 @@ import time
 DEFAULT_USERS_FILE = "/var/lib/fortune-mcp/users.json"
 
 
+def _chown_to_dir_owner(path):
+    """root 运行 useradmin 时，把新写文件归还给服务用户（数据目录所有者）。
+
+    服务以 fortune 用户运行（0600 文件读不了 root 属主的），CLI 却常用
+    sudo 跑，会把 users.json / *.key 写成 root:root，导致服务重启即崩。
+    这里在 root 写入后按目录属主纠正，非 root 或目录本就是 root 时不动。
+    """
+    try:
+        if os.geteuid() != 0:
+            return
+        dpath = os.path.dirname(os.path.abspath(path))
+        dir_stat = os.stat(dpath)
+        if dir_stat.st_uid == 0:      # 目录属主也是 root，无从推断服务用户
+            return
+        if os.stat(path).st_uid == 0:
+            os.chown(path, dir_stat.st_uid, dir_stat.st_gid)
+    except Exception:
+        pass
+
+
 class UserStoreError(Exception):
     """凭据库读写或解密失败。"""
 
@@ -101,6 +121,7 @@ class Cipher:
             raise UserStoreError(
                 "无法写入密钥文件 %s（%s）。修正：sudo mkdir -p %s "
                 "&& sudo chown fortune:fortune %s" % (key_file, exc, key_dir, key_dir))
+        _chown_to_dir_owner(key_file)
         return cls(key)
 
     def _keystream(self, nonce, length):
@@ -171,6 +192,7 @@ class UserStore:
             os.chmod(self.path, 0o600)
         except Exception:
             pass
+        _chown_to_dir_owner(self.path)
 
     # ---- 查询 -------------------------------------------------------------
     def platform_users(self):

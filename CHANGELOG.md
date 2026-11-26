@@ -3,6 +3,17 @@
 版本号遵循语义化版本（SemVer），与 `fortune_tools.py` 中的 `SERVER_VERSION`、
 镜像标签及发布标签保持一致。
 
+## v3.1.3 — 2026-11-26
+
+修复 root 运行 `useradmin.py` 后服务无法启动的问题。
+
+### 修复
+
+- `user_store.py`：root 身份写入 `users.json` / 密钥文件后，自动把属主纠正为
+  数据目录（如 `/var/lib/fortune-mcp`）的所有者。此前 `sudo python3 useradmin.py add`
+  会把 0600 的凭据库写成 `root:root`，而服务以 `fortune` 用户运行，重启即因
+  `PermissionError` 崩溃进入 auto-restart 循环。
+
 ## v3.1.2 — 2026-11-26
 
 修复「自建应用免授权」下平台通过自定义头传递令牌导致全程 401 的问题，补齐命令行自检的配置读取。

@@ -7,7 +7,7 @@
 - 同时支持 **stdio** 模式（本地 `mcp.json` 调试）
 - 工具数：**13 个**（查询账户/账本/分类/标签/收付款方 + 记账/转账/建账户）
 - 默认下游地址：`http://fortune.example.com:46031/prod-api`（可用 `FORTUNE_BASE_URL` 覆盖）
-- 当前版本：**v3.1.2**（与 `SERVER_VERSION`、Docker 镜像标签及发布标签一致）
+- 当前版本：**v3.1.3**（与 `SERVER_VERSION`、Docker 镜像标签及发布标签一致）
 
 ---
 
@@ -307,6 +307,8 @@ python3 /opt/fortune-mcp/useradmin.py import users.csv          # 批量导入
 - 凭据库里**不存明文**：HMAC-SHA256 派生密钥流加密 + 加密后再 MAC，逐条 16 字节随机 nonce。
 - 密钥来自 `FORTUNE_CRED_KEY`（推荐 KMS/Vault 注入），留空则自动生成 `users.json.key`（0600）。
 - `users.json` 权限 0600，仅运行用户可读。
+- 用 `sudo` 跑 `useradmin.py` 时，写入后的 `users.json` / `*.key` 会自动按数据目录属主纠正，
+  不会再出现「CLI 写成 `root:root`、服务以 `fortune` 用户读不了」的启动崩溃。
 - 每次工具调用都写一行审计：`audit user=demo_user fortune=demo_user tool=fortune_add_expense ok`。
 - 密钥丢失 = 凭据库不可解，只能重新导入；请把 `.key` 纳入备份。
 
