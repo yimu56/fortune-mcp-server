@@ -33,6 +33,7 @@ import hmac
 import json
 import os
 import secrets
+import sys
 import time
 
 DEFAULT_USERS_FILE = "/var/lib/fortune-mcp/users.json"
@@ -167,8 +168,35 @@ class UserStore:
             key_file=key_file or os.environ.get("FORTUNE_CRED_KEY_FILE")
             or (self.path + ".key"))
         self._data = self._load()
+        self._stamp = self._file_stamp()
 
     # ---- 读写 -------------------------------------------------------------
+    def _file_stamp(self):
+        """凭据库文件的身份戳：修改时间、大小、inode，任一变化即视为被改写。"""
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+    def _maybe_reload(self):
+        """文件被其他进程（如 useradmin.py）改写后自动重新加载，服务无需重启。
+
+        启动时的首次加载失败会直接抛错；运行期重新加载失败则沿用内存中的
+        上一份数据并输出告警，避免一次异常写入让全部调用失败。
+        """
+        stamp = self._file_stamp()
+        if stamp == self._stamp:
+            return
+        try:
+            data = self._load()
+        except UserStoreError as exc:
+            sys.stderr.write("[warn] 凭据库重新加载失败，沿用原有数据：%s\n" % exc)
+            self._stamp = stamp
+            return
+        self._data = data
+        self._stamp = stamp
+
     def _load(self):
         if not os.path.exists(self.path):
             return {"version": 1, "users": {}}
@@ -193,12 +221,15 @@ class UserStore:
         except Exception:
             pass
         _chown_to_dir_owner(self.path)
+        self._stamp = self._file_stamp()
 
     # ---- 查询 -------------------------------------------------------------
     def platform_users(self):
+        self._maybe_reload()
         return sorted(self._data["users"].keys())
 
     def get(self, platform_user):
+        self._maybe_reload()
         return self._data["users"].get(self._normalize(platform_user))
 
     @staticmethod
@@ -207,6 +238,7 @@ class UserStore:
 
     def creds_for(self, platform_user):
         """返回该平台用户的记账凭据；未绑定/已禁用时抛异常。"""
+        self._maybe_reload()
         key = self._normalize(platform_user)
         record = self._data["users"].get(key)
         if record is None:
@@ -250,6 +282,7 @@ class UserStore:
         return key
 
     def set_enabled(self, platform_user, enabled):
+        self._maybe_reload()
         key = self._normalize(platform_user)
         if key not in self._data["users"]:
             raise UserStoreError("未找到用户：%s" % platform_user)
@@ -258,6 +291,7 @@ class UserStore:
         self._save()
 
     def remove(self, platform_user):
+        self._maybe_reload()
         key = self._normalize(platform_user)
         if key not in self._data["users"]:
             raise UserStoreError("未找到用户：%s" % platform_user)
@@ -266,6 +300,7 @@ class UserStore:
 
     def import_csv(self, csv_path):
         """批量导入，列名：platform_user,fortune_username,password,note[base_url]。"""
+        self._maybe_reload()
         added, updated, failed = 0, 0, []
         with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)

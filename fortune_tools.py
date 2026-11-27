@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Fortune 记账 MCP 工具定义与实现（被 server.py 的 HTTP / stdio 两种传输共用）。"""
 
+import math
 from datetime import datetime
 
 from fortune_api import FortuneError
@@ -14,7 +15,7 @@ INSTRUCTIONS = """\
 
 使用约定：
 1. 记账前先调用 fortune_context 拿到 groupId / bookId / 账户列表与余额，避免用错账户。
-2. account_id / category_id 既可以传数字 ID，也可以直接传中文名称，工具会自动解析；名称模糊命中多个时先向用户确认。
+2. account_id / category_id 既可以传数字 ID，也可以直接传中文名称，工具会自动解析；名称模糊命中多个时调用会被拒绝并返回候选列表，此时向用户确认后改传 ID 或完整名称。
 3. bill_type：1=支出，2=收入，3=转账；trade_time 省略时取服务器当前时间，格式 YYYY-MM-DD HH:MM:SS。
 4. 记账类工具执行后账户余额会立即变化，属于写入操作；用户未明确表示要记账时不要自动调用。
 5. 金额单位与账本币种一致（默认 CNY），amount 必须大于 0。
@@ -85,9 +86,15 @@ def _resolve_account(client, group_id, value):
     for a in accounts:
         if text == a.get("accountName"):
             return a["accountId"], a
-    for a in accounts:
-        if text in str(a.get("accountName", "")):
-            return a["accountId"], a
+    hits = [a for a in accounts if text in str(a.get("accountName", ""))]
+    if len(hits) > 1:
+        # 前缀相同的账户不止一个时不能替调用方挑，否则可能记到别的账户上
+        raise FortuneError(
+            "账户名「%s」匹配到多个账户：%s；请改传 account_id 或完整账户名"
+            % (text, ", ".join("%s(%s)" % (a.get("accountName"), a.get("accountId"))
+                               for a in hits)))
+    if hits:
+        return hits[0]["accountId"], hits[0]
     raise FortuneError(f"未找到账户: {value}；可用账户: "
                        + ", ".join(str(a.get("accountName")) for a in accounts))
 
@@ -114,9 +121,14 @@ def _resolve_category(client, book_id, bill_type, value):
     for c in categories:
         if text and text == c.get("categoryName"):
             return c["categoryId"]
-    for c in categories:
-        if text and text in str(c.get("categoryName", "")):
-            return c["categoryId"]
+    hits = [c for c in categories if text and text in str(c.get("categoryName", ""))]
+    if len(hits) > 1:
+        raise FortuneError(
+            "分类名「%s」匹配到多个分类：%s；请改传 category_id 或完整分类名"
+            % (text, ", ".join("%s(%s)" % (c.get("categoryName"), c.get("categoryId"))
+                               for c in hits)))
+    if hits:
+        return hits[0]["categoryId"]
     names = ", ".join(str(c.get("categoryName")) for c in categories)
     raise FortuneError(f"未找到分类: {value}；可用分类: {names}")
 
@@ -152,8 +164,8 @@ def _positive_amount(value):
         amount = float(value)
     except (TypeError, ValueError):
         raise FortuneError(f"amount 必须是数字，收到: {value!r}")
-    if amount <= 0:
-        raise FortuneError("amount 必须大于 0")
+    if not math.isfinite(amount) or amount <= 0:
+        raise FortuneError("amount 必须是大于 0 的有限数字")
     return round(amount, 2)
 
 

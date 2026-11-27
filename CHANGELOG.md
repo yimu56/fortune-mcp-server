@@ -5,9 +5,25 @@
 
 ## 未发布
 
-修复 root 安装时忽略 `.env`，导致生成的 `/etc/fortune-mcp.env` 仍是默认配置的问题。
+修复 root 安装时忽略 `.env` 的问题，以及四处影响正确性与暴露面的缺陷。
 
 ### 修复
+
+- `user_store.py`：凭据库支持热加载。每次取凭据前核对 `users.json` 的修改时间、大小与 inode，
+  被其他进程（如 `useradmin.py`）改写后自动重新加载，与文档中「改动不需要重启」的约定一致；
+  此前新增、停用、删除的用户都要重启服务才生效。运行期重新加载失败时沿用原有数据并输出告警。
+- `fortune_tools.py`：账户名、分类名模糊匹配命中多个时拒绝调用并列出候选，
+  不再静默选中第一个；此前同前缀的账户（如「现金」与「备用现金」）可能记错账户。
+- `fortune_tools.py`：金额校验拦截 `nan` / `inf` 等非有限数字，此前会被放行并提交给下游。
+- `server.py`：免鉴权的 `/healthz` 不再返回记账登录名，只给出账号是否已配置；
+  命令行 `--self-check` 仍展示登录名。
+
+### 新增
+
+- 离线回归测试 `tests/test_regressions.py`（标准库 `unittest`，不依赖下游记账系统）：
+  `python3 -m unittest discover -s tests`
+
+### 安装脚本
 
 - `install.sh`：新增 `--env-file`，并按 `--env-file` > `FORTUNE_ENV_FILE` > 脚本目录 `.env` > 当前目录 `.env`
   的顺序加载配置；解析规则与 `server.py` 的 `load_env_files` 一致，已存在的环境变量保持优先。

@@ -201,7 +201,12 @@ class Config:
                 "encrypted_password": self.encrypted_password,
                 "token": self.token}
 
-    def summary(self):
+    def summary(self, reveal_user=False):
+        """服务概况。默认只给出账号是否已配置，登录名仅在 reveal_user=True 时返回。
+
+        /healthz 免鉴权，不能把记账登录名交给任何能访问端口的调用方；
+        命令行 --self-check 由运维本机执行，才传 reveal_user=True。
+        """
         if self.introspect_enabled:
             identity = "introspect"
         elif self.multi_tenant:
@@ -209,7 +214,8 @@ class Config:
         else:
             identity = "single"
         return {"baseUrl": self.base_url,
-                "username": self.username or "(未配置)",
+                "username": ((self.username or "(未配置)") if reveal_user
+                             else ("(已配置)" if self.username else "(未配置)")),
                 "authRequired": bool(self.auth_token),
                 "headerCred": self.allow_header_cred,
                 "multiTenant": self.multi_tenant,
@@ -1275,7 +1281,8 @@ def main():
 
     if args.self_check:
         pool = ClientPool(cfg)
-        print(json.dumps({"config": cfg.summary()}, ensure_ascii=False, indent=2))
+        print(json.dumps({"config": cfg.summary(reveal_user=True)},
+                         ensure_ascii=False, indent=2))
         try:
             client = pool.get(cfg.default_creds())
             gid = client.get_default_group_id()

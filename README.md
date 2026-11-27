@@ -23,6 +23,7 @@ fortune-mcp-server/
 ├── user_store.py                 # 多租户凭据库（加密存储 平台用户→记账账号）
 ├── useradmin.py                  # 凭据库管理 CLI（add/list/disable/import）
 ├── smoke_test.py                 # 冒烟测试（可在服务器上直接跑）
+├── tests/test_regressions.py     # 离线回归测试（python3 -m unittest discover -s tests）
 ├── healthcheck.py                # 容器健康检查
 ├── install.sh                    # 一键安装（systemd / 用户级服务）
 ├── uninstall.sh                  # 卸载（支持保留配置/彻底清除/dry-run）
@@ -175,7 +176,7 @@ sudo bash uninstall.sh --yes --purge
 | DELETE | `/mcp` | 结束会话（`Mcp-Session-Id`） |
 | GET | `/sse` | 旧版 SSE 通道，先下发 `endpoint` 事件 |
 | POST | `/messages?sessionId=xxx` | 旧版 SSE 的客户端消息入口 |
-| GET | `/healthz` | 健康检查（免鉴权，供监控探活） |
+| GET | `/healthz` | 健康检查（免鉴权，供监控探活；只返回账号是否已配置，不含登录名） |
 | GET | `/` | 服务信息 JSON |
 
 鉴权：除 `/healthz` 外都需要 `Authorization: Bearer <MCP_AUTH_TOKEN>`；
@@ -290,7 +291,8 @@ python3 /opt/fortune-mcp/useradmin.py template > users.csv      # CSV 模板
 python3 /opt/fortune-mcp/useradmin.py import users.csv          # 批量导入
 ```
 
-凭据库改动**不需要重启**（每次调用都重新读取）。
+凭据库改动**不需要重启**：服务每次取凭据前会核对 `users.json` 是否变化，变化即自动重新加载。
+更换 `FORTUNE_CRED_KEY` 或密钥文件不在热加载范围内，仍需重启。
 
 > CLI 启动时自动加载 `FORTUNE_ENV_FILE`、`/etc/fortune-mcp.env` 与 `.env`，
 > 因此 `--verify` 校验账号时能直接读到 `FORTUNE_BASE_URL`；shell 中已 export 的变量优先。
@@ -305,6 +307,8 @@ python3 /opt/fortune-mcp/useradmin.py import users.csv          # 批量导入
 | 用户已停用 | 返回“账号已被停用，请联系管理员” |
 | 身份头命中多值 | 按 `MCP_USER_HEADERS` 顺序取第一个非空 |
 | 传了别人的账户/分类/标签/账本 ID | 直接拒绝并列出本账号可用的 ID |
+| 账户名 / 分类名匹配到多个 | 拒绝并列出候选，需改传 ID 或完整名称 |
+| 金额为 `nan` / `inf` / 负数 / 0 | 拒绝 |
 
 身份头候选（默认）：`X-WorkBuddy-User > X-User-Id > X-Employee-Id > X-Authenticated-User > Remote-User`，
 可用 `MCP_USER_HEADERS` 改成平台实际使用的头名。
