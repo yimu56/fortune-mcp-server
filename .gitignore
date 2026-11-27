@@ -11,10 +11,15 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
-# 运行时缓存与数据
+# 运行时缓存与数据（凭据库含加密口令，CSV 导入件含明文口令）
 .cache/
 data/
 *.log
+users.json
+users.json.key
+users*.csv
+*.tgz
+*.tar.gz
 
 # 编辑器与系统文件
 .DS_Store

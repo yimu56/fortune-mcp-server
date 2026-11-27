@@ -9,24 +9,83 @@ grep -qU $'\r' "$0" 2>/dev/null && sed -i 's/\r$//' "$0" && exec bash "$0" "$@";
 #   bash install.sh                        # 普通用户：装到 ~/fortune-mcp + systemd --user
 #   sudo bash install.sh --port 18088 --dir /opt/fortune-mcp
 #   sudo bash install.sh --no-firewall        # 不改防火墙
+#   sudo bash install.sh --env-file /path/to/.env  # 显式指定环境变量文件
 #   sudo bash install.sh --uninstall          # 停止并卸载（保留配置与缓存）
 #
+# 配置来源：--env-file > FORTUNE_ENV_FILE > 脚本目录 .env > 当前目录 .env
+# 首次安装时找到的 .env 会被安装为目标配置；已存在的目标配置不会被覆盖。
 # 安装完成后会打印：服务地址、Bearer Token、自检命令。
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 SERVICE="fortune-mcp"
-PORT="${MCP_PORT:-18088}"
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+info()  { printf '\033[32m[+]\033[0m %s\n' "$*"; }
+warn()  { printf '\033[33m[!]\033[0m %s\n' "$*"; }
+die()   { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# 解析 KEY=VALUE；已存在的环境变量保持原值，规则与 server.py 的 load_env_files 一致
+load_env_file() {
+    local file="$1" line key value first last
+    [ -f "$file" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [ -z "$line" ] && continue
+        [[ "$line" == \#* ]] && continue
+        if [[ "$line" == export[[:space:]]* ]]; then
+            line="${line#export}"
+            line="${line#"${line%%[![:space:]]*}"}"
+        fi
+        [[ "$line" == *=* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key%"${key##*[![:space:]]}"}"
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        if [ ${#value} -ge 2 ]; then
+            first="${value:0:1}"; last="${value: -1}"
+            if { [ "$first" = "'" ] && [ "$last" = "'" ]; } || \
+               { [ "$first" = '"' ] && [ "$last" = '"' ]; }; then
+                value="${value:1:${#value}-2}"
+            fi
+        fi
+        declare -p "$key" >/dev/null 2>&1 || export "$key=$value"
+    done < "$file"
+    return 0
+}
+
+# 覆盖或追加某一项配置（保留注释与原顺序）
+patch_env() {
+    local file="$1" key="$2" value="$3" tmp="${1}.tmp.$$"
+    if grep -qE "^[[:space:]]*#?[[:space:]]*${key}=" "$file"; then
+        awk -v k="$key" -v v="$value" '
+            !done && $0 ~ "^[[:space:]]*#?[[:space:]]*" k "=" { print k "=" v; done=1; next }
+            { print }
+        ' "$file" > "$tmp"
+        cat "$tmp" > "$file"
+        rm -f "$tmp"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
 APP_DIR="${APP_DIR:-}"
 DO_FIREWALL=1
 UNINSTALL=0
 UN_EXTRA=()
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PORT_ARG=""
+ENV_FILE_ARG="${FORTUNE_ENV_FILE:-}"
+ENV_SOURCE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --port) PORT="$2"; shift 2 ;;
+        --port) PORT_ARG="$2"; shift 2 ;;
         --dir) APP_DIR="$2"; shift 2 ;;
+        --env-file) ENV_FILE_ARG="$2"; shift 2 ;;
         --no-firewall) DO_FIREWALL=0; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         --yes|-y|--purge|--dry-run|--keep-app|--close-firewall)
@@ -36,9 +95,20 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-info()  { printf '\033[32m[+]\033[0m %s\n' "$*"; }
-warn()  { printf '\033[33m[!]\033[0m %s\n' "$*"; }
-die()   { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+if [ -n "$ENV_FILE_ARG" ]; then
+    [ -f "$ENV_FILE_ARG" ] || die "环境变量文件不存在：$ENV_FILE_ARG"
+    ENV_SOURCE="$(cd "$(dirname "$ENV_FILE_ARG")" && pwd)/$(basename "$ENV_FILE_ARG")"
+elif [ -f "$SRC_DIR/.env" ]; then
+    ENV_SOURCE="$SRC_DIR/.env"
+elif [ -f "$PWD/.env" ] && [ "$PWD/.env" != "$SRC_DIR/.env" ]; then
+    ENV_SOURCE="$PWD/.env"
+fi
+if [ -n "$ENV_SOURCE" ]; then
+    load_env_file "$ENV_SOURCE" || die "无法读取环境变量文件：$ENV_SOURCE"
+    info "已加载配置来源：$ENV_SOURCE"
+fi
+
+PORT="${PORT_ARG:-${MCP_PORT:-18088}}"
 
 IS_ROOT=0
 [ "$(id -u)" -eq 0 ] && IS_ROOT=1
@@ -98,12 +168,18 @@ mkdir -p "$CACHE_DIR"
 # ---------------------------------------------------------------- 配置文件
 if [ -f "$ENV_FILE" ]; then
     info "已存在配置 $ENV_FILE，保留原值（如需改端口/令牌请手动编辑）"
+    [ -n "$ENV_SOURCE" ] && warn "检测到 $ENV_SOURCE，但未覆盖 $ENV_FILE；如需应用请先移除旧配置"
     TOKEN="$(grep -E '^MCP_AUTH_TOKEN=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
     PORT="$(grep -E '^MCP_PORT=' "$ENV_FILE" | head -1 | cut -d= -f2- || echo "$PORT")"
 else
-    TOKEN="${MCP_AUTH_TOKEN:-$(gen_token)}"
     umask 077
-    cat > "$ENV_FILE" <<EOF
+    if [ -n "$ENV_SOURCE" ]; then
+        # 原样保留用户填写的全部配置项与注释，仅规范换行
+        sed 's/\r$//' "$ENV_SOURCE" > "$ENV_FILE"
+        info "已按 $ENV_SOURCE 生成配置 $ENV_FILE"
+    else
+        TOKEN="${MCP_AUTH_TOKEN:-$(gen_token)}"
+        cat > "$ENV_FILE" <<EOF
 # Fortune 记账 MCP Server 配置（安装脚本生成）
 FORTUNE_BASE_URL=${FORTUNE_BASE_URL:-http://fortune.example.com:46031/prod-api}
 FORTUNE_USERNAME=${FORTUNE_USERNAME:-CHANGE_ME}
@@ -127,9 +203,20 @@ FORTUNE_ALLOW_HEADER_CRED=0
 # MCP_USER_HEADERS=X-WorkBuddy-User,X-User-Id,X-Employee-Id,X-Authenticated-User
 # FORTUNE_SINGLE_FALLBACK=0
 EOF
+        info "已生成配置 $ENV_FILE（令牌为随机生成，见文末）"
+    fi
     umask 022
+    if [ -n "$ENV_SOURCE" ]; then
+        patch_env "$ENV_FILE" FORTUNE_TOKEN_CACHE_DIR "$CACHE_DIR"
+        patch_env "$ENV_FILE" MCP_PORT "$PORT"
+        case "${MCP_AUTH_TOKEN:-}" in
+            ""|CHANGE_ME|change-me-to-a-long-random-string)
+                TOKEN="$(gen_token)"
+                patch_env "$ENV_FILE" MCP_AUTH_TOKEN "$TOKEN" ;;
+        esac
+    fi
+    TOKEN="$(grep -E '^MCP_AUTH_TOKEN=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
     [ $IS_ROOT -eq 1 ] && chown "$RUN_USER":"$RUN_USER" "$ENV_FILE" && chmod 600 "$ENV_FILE"
-    info "已生成配置 $ENV_FILE（令牌为随机生成，见文末）"
 fi
 
 # ---------------------------------------------------------------- systemd

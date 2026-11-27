@@ -9,6 +9,8 @@
 - 默认下游地址：`http://fortune.example.com:46031/prod-api`（可用 `FORTUNE_BASE_URL` 覆盖）
 - 当前版本：**v3.1.3**（与 `SERVER_VERSION`、Docker 镜像标签及发布标签一致）
 
+从零部署到企业后台发布、验收与运维，参见 [实施手册](docs/enterprise-connector-publish-guide.md)。
+
 ---
 
 ## 一、目录结构
@@ -58,6 +60,11 @@ unzip fortune-mcp-server.zip && cd fortune-mcp-server && sudo bash install.sh
 脚本会自动完成：环境检查 → 复制到 `/opt/fortune-mcp` → 创建 `fortune` 运行用户 →
 生成 `/etc/fortune-mcp.env`（含**随机 Bearer Token**）→ 安装 systemd 服务并启动 → 放行防火墙端口 →
 健康检查 → 打印连接器所需信息。
+
+> 安装脚本按 `--env-file` > `FORTUNE_ENV_FILE` > 脚本目录 `.env` > 当前目录 `.env` 的顺序查找配置。
+> 首次安装时若找到 `.env`，会原样安装为 `/etc/fortune-mcp.env`（保留全部配置项与注释、规范 CRLF，
+> 并按安装目录修正 `FORTUNE_TOKEN_CACHE_DIR`、按 `--port` 修正 `MCP_PORT`；令牌仍为样例占位符时自动生成随机值）。
+> 已存在的 `/etc/fortune-mcp.env` 不会被覆盖，脚本会给出提示。
 
 常用参数：
 
@@ -112,8 +119,8 @@ python3 /opt/fortune-mcp/smoke_test.py http://127.0.0.1:18088/mcp '<TOKEN>' --wr
 ```
   · initialize  ok  protocol=2025-06-18 session=...
   · tools/list  ok  共 13 个工具
-  · fortune_context  ok  group=5 book=11 账户=2
-  · fortune_add_transfer  ok  余额已复原 (74.99 / 25.01)
+  · fortune_context  ok  group=<分组ID> book=<账本ID> 账户=<数量>
+  · fortune_add_transfer  ok  余额已复原
 全部通过 ✔
 ```
 

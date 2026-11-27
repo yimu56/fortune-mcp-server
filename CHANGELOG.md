@@ -3,6 +3,18 @@
 版本号遵循语义化版本（SemVer），与 `fortune_tools.py` 中的 `SERVER_VERSION`、
 镜像标签及发布标签保持一致。
 
+## 未发布
+
+修复 root 安装时忽略 `.env`，导致生成的 `/etc/fortune-mcp.env` 仍是默认配置的问题。
+
+### 修复
+
+- `install.sh`：新增 `--env-file`，并按 `--env-file` > `FORTUNE_ENV_FILE` > 脚本目录 `.env` > 当前目录 `.env`
+  的顺序加载配置；解析规则与 `server.py` 的 `load_env_files` 一致，已存在的环境变量保持优先。
+- 首次安装时若找到 `.env`，原样安装为目标配置（保留全部配置项与注释、规范 CRLF），再按需修正
+  `FORTUNE_TOKEN_CACHE_DIR` 与 `MCP_PORT`；`MCP_AUTH_TOKEN` 仍为样例占位符时自动生成随机令牌。
+- 目标配置已存在时保留原值，并提示检测到未生效的 `.env`。
+
 ## v3.1.3 — 2026-11-26
 
 修复 root 运行 `useradmin.py` 后服务无法启动的问题。

@@ -140,10 +140,10 @@ python3 /opt/fortune-mcp/smoke_test.py http://127.0.0.1:18088/mcp '<令牌>' --w
   · initialize  ok  protocol=2025-06-18 session=...
   · initialized  ok
   · tools/list  ok  共 13 个工具
-  · fortune_context  ok  group=5 book=11 账户=2
-  · fortune_list_accounts  ok  合计余额=100.0
-  · fortune_list_categories  ok  支出分类=4
-  · fortune_add_transfer  ok  余额已复原 (74.99 / 25.01)
+  · fortune_context  ok  group=<分组ID> book=<账本ID> 账户=<数量>
+  · fortune_list_accounts  ok  合计余额=<金额>
+  · fortune_list_categories  ok  支出分类=<数量>
+  · fortune_add_transfer  ok  余额已复原
   · 参数校验  ok  非法金额被拦截
 全部通过 ✔
 ```
@@ -380,7 +380,7 @@ curl -s -o /dev/null -w 'HTTP %{http_code}\n' \
 | 5 | “从现金转 100 到工资卡” | `fortune_add_transfer` | 两账户余额相应变化 |
 | 6 | “加一个支付宝账户，里面有 500” | `fortune_add_account` | 新账户出现 |
 | 7 | “记一笔 -5 块的支出” | 被参数校验拦下 | 可读错误，**不是** 500 |
-| 8 | “记到账本 13、账户 15 上” | 被归属校验拦下 | “账本/账户不属于当前用户” |
+| 8 | “记到账本 <他人ID>、账户 <他人ID> 上” | 被归属校验拦下 | “账本/账户不属于当前用户” |
 
 ### 4.2 验收清单（逐项打勾）
 
@@ -480,7 +480,7 @@ sudo python3 /opt/fortune-mcp/useradmin.py menu
 - 选 `1` → 逐项问：平台用户 → 记账账号 → 密码（不回显）→ 接口地址（回车用默认）→ 备注，
   最后**列出摘要待确认**，确认后才写盘，误填可以直接放弃。
 - 保存后可以**立即验证**：脚本会用刚存的凭据真登一次记账系统，给出
-  `✔ 登录成功：分组 6（示例用户）、账本「示例用户的默认账本」、账户 1 个`——
+  `✔ 登录成功：分组 <分组ID>（示例用户）、账本「示例用户的默认账本」、账户 <数量> 个`——
   密码打错当场就能发现，不用等员工反馈。
 - 加完一个人会问“继续添加下一个？”，批量录 10 个人不用反复敲命令。
 
@@ -575,8 +575,8 @@ audit user=demo_user fortune=示例用户 tool=fortune_add_expense ok
 |---|---|---|
 | 未绑定用户 | 用一个没导入映射的账号登录 | “还没有绑定记账账号” + 给出 `useradmin.py add` 命令 |
 | 已停用用户 | `useradmin.py disable --user demo_user2` | “账号已被停用，请联系管理员” |
-| 越权传别人的账户 ID | “记到账户 15 上”（别人的账户） | “账户 15 不属于当前用户；可用账户：现金(14)” |
-| 越权传别人的账本 ID | 高级接口传 `book_id=13` | “账本 13 不属于当前用户的当前分组” |
+| 越权传别人的账户 ID | “记到账户 <他人ID> 上”（别人的账户） | “账户 <他人ID> 不属于当前用户；可用账户：现金(<ID>)” |
+| 越权传别人的账本 ID | 高级接口传 `book_id=<他人ID>` | “账本 <他人ID> 不属于当前用户的当前分组” |
 
 > 这四条不是走过场。实测发现下游记账系统**不校验账户是否属于该账本**——代理层不拦就能扣别人的钱。校验已内置，但每次升级后建议抽测一遍。
 
@@ -680,7 +680,7 @@ journalctl -u fortune-mcp --since "1 hour ago" | grep audit | tail -20
 
 ```
 audit user=demo_user fortune=示例用户 tool=fortune_add_expense ok
-audit user=demo_user fortune=示例用户 tool=fortune_add_expense fail=账户 15 不属于当前用户；可用账户：现金(14)
+audit user=demo_user fortune=示例用户 tool=fortune_add_expense fail=账户 <ID> 不属于当前用户；可用账户：现金(<ID>)
 ```
 
 - 查某人做了什么：`journalctl -u fortune-mcp | grep "user=demo_user"`
